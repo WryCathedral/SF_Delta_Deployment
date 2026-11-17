@@ -16,12 +16,3 @@ This extension adds a single Azure Pipelines task **Salesforce org: validate & d
 2. **After merge**: The CI build on that **same branch** (not a PR build) triggers **deploy** for the merged commit.
 
 Use a **checkout** step with `fetchDepth: 0` so `HEAD~1` resolves (avoid shallow clones with depth 1).
-
-## Publishing the VSIX
-
-1. Install [Node.js](https://nodejs.org/) and the packaging tool: `npm install -g tfx-cli` (see [tfs-cli](https://github.com/Microsoft/tfs-cli)).
-2. Replace `YOUR_PUBLISHER_ID` in `vss-extension.json` with your [Azure DevOps publisher](https://learn.microsoft.com/en-us/azure/devops/extend/publish/overview).
-3. From this folder run: `tfx extension create --manifest-globs vss-extension.json`
-4. Upload the `.vsix` under **Organization settings** &rarr; **Extensions** &rarr; **Shared**, then install it for your project collection.
-
-More detail: [Add a custom pipelines task](https://learn.microsoft.com/en-us/azure/devops/extend/develop/add-build-task?view=azure-devops).
