@@ -1,8 +1,21 @@
-# Salesforce org: validate & deploy (delta)
+# Salesforce Delta Pipeline
 
-Azure Pipelines task **`SfOrgValidateDeploy`**. It logs in to a Salesforce org, builds a metadata delta with **sfdx-git-delta** between two git refs, and either validates that delta (dry-run) or deploys it. On validation it can also run Salesforce Code Analyzer on the delta sources only. A failed validate, deploy, or severity gate fails the task.
+This extension adds a single Azure Pipelines task **Salesforce org: validate & deploy(delta)** (`SfOrgValidateDeploy`) that:
 
-Checkout the repository with **`fetchDepth: 0`**. The default delta range is `HEAD~1` to `HEAD`, and a shallow clone cannot resolve `HEAD~1`.
+- Computes metadata delta with **sfdx-git-delta** between `HEAD` and `HEAD~1` (configurable refs). Branch policy uses a single **target (integration) branch** setting: validate when a PR **targets** that branch; deploy when a build runs on that **same branch** after merge.
+- Authenticates with **JWT** or **SFDX Auth URL** (pick list; only the selected method’s fields are shown).
+- **Validate** path: optional **Code Analyzer** (checkbox) on **delta-generated sources only**. Default rule selector, or a **custom PMD ruleset** path when that option is checked. Optional CSV **severity gate**.
+- Lets the user pick **separate Apex test levels** for validate vs deploy, **deploy wait time**, **ignore warnings / conflicts**, and (for JWT) **sandbox vs production** org type.
+- Runs **dry-run deploy** of the delta package. If validation fails, the task **fails** (no full-metadata fallback).
+- **Deploy** path: deploys the delta. If deployment fails, the task **fails** (no full-metadata fallback).
+- Publishes **pipeline artifacts** for the delta package folder and Code Analyzer reports; artifact names are configurable for each pipeline.
+
+## Branch policy and PR flow
+
+1. **Pull request validation**: Set the task **Target branch** (for example `develop`) to match your policy branch. When a PR **targets** that branch, **Auto** runs **validate** (optional analyzer + delta dry-run).
+2. **After merge**: The CI build on that **same branch** (not a PR build) triggers **deploy** for the merged commit.
+
+Use a **checkout** step with `fetchDepth: 0` so `HEAD~1` resolves (avoid shallow clones with depth 1).
 
 ## What the task does
 
@@ -44,11 +57,11 @@ In **auto** mode the task reads these pipeline variables. You do not set them on
 | `orgType` | Yes | `sandbox` | `authMethod` = `jwt` | Used only when **Instance URL** is empty. `sandbox` uses `https://test.salesforce.com`. `production` uses `https://login.salesforce.com`. Any other value uses `https://test.salesforce.com`. |
 | `client_id` | Yes | `$(client_id)` | `authMethod` = `jwt` | Connected app consumer key, passed as `--client-id`. The task fails when this is empty. |
 | `username` | Yes | `$(username)` | `authMethod` = `jwt` | Salesforce username for the JWT user, passed as `--username`. The task fails when this is empty. |
-| `instance_url` | No | `$(instance_url)` | `authMethod` = `jwt` | When set, this exact value is `--instance-url` and `orgType` is not used to pick the host. Use it for a My Domain URL. |
+| `instance_url` | No | empty | `authMethod` = `jwt` | When set, this exact value is `--instance-url` and `orgType` is not used to pick the host. Use it for a My Domain URL. |
 | `jwt_key_file` | Yes | `$(jwt_key_file)` | `authMethod` = `jwt` | Full path on the agent to the JWT private key (`--jwt-key-file`). Typical value after Download Secure File: `$(jwtkey.secureFilePath)`. |
 | `jwt_token_path` | No | empty | `authMethod` = `jwt` | When set, this path is the key file and `jwt_key_file` is ignored. The file must exist on the agent. |
-| `sfdx_auth_url_file` | No | `$(sfdx_auth_url_file)` | `authMethod` = `authUrl` | Path to a file whose contents are the SFDX Auth URL (`force://...`). A relative path is resolved from the repository root. When this input is set, the task uses the file and does not use `sfdx_auth_url`. The task fails when the file is missing. |
-| `sfdx_auth_url` | No | `$(sfdx_auth_url)` | `authMethod` = `authUrl` | The Auth URL itself, usually a secret variable. Used only when `sfdx_auth_url_file` is empty. The task writes it to `.sf-auth/sfdx-auth-url.txt` and logs in from that file. |
+| `sfdx_auth_url_file` | No | empty | `authMethod` = `authUrl` | Path to a file whose contents are the SFDX Auth URL (`force://...`). A relative path is resolved from the repository root. When this input is set, the task uses the file and does not use `sfdx_auth_url`. The task fails when the file is missing. |
+| `sfdx_auth_url` | No | empty | `authMethod` = `authUrl` | The Auth URL itself, usually a secret variable. Used only when `sfdx_auth_url_file` is empty. The task writes it to `.sf-auth/sfdx-auth-url.txt` and logs in from that file. |
 
 Auth URL mode fails when both `sfdx_auth_url_file` and `sfdx_auth_url` are empty.
 

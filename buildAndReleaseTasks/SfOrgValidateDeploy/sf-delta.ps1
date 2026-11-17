@@ -1,4 +1,4 @@
-#requires -version 5.1
+﻿#requires -version 5.1
 [CmdletBinding()]
 param()
 
@@ -536,6 +536,7 @@ if ([string]::IsNullOrWhiteSpace($ruleSel)) { $ruleSel = 'all' }
 $analyzerThresh = Get-TaskInput -Name 'codeAnalyzerSeverityThreshold'
 if ([string]::IsNullOrWhiteSpace($analyzerThresh)) { $analyzerThresh = '2' }
 $enforceGate = Test-InputBool (Get-TaskInput -Name 'enforceSeverityGate')
+if ([string]::IsNullOrWhiteSpace((Get-TaskInput -Name 'enforceSeverityGate'))) { $enforceGate = $true }
 $maxSevStr = Get-TaskInput -Name 'maxAllowedSeverity'
 $maxAllowed = 2
 if (-not [string]::IsNullOrWhiteSpace($maxSevStr)) {
@@ -544,6 +545,7 @@ if (-not [string]::IsNullOrWhiteSpace($maxSevStr)) {
 }
 
 $pubDelta = Test-InputBool (Get-TaskInput -Name 'publishDeltaArtifact')
+if ([string]::IsNullOrWhiteSpace((Get-TaskInput -Name 'publishDeltaArtifact'))) { $pubDelta = $true }
 $deltaArtName = Get-TaskInput -Name 'deltaArtifactName'
 if ([string]::IsNullOrWhiteSpace($deltaArtName)) { $deltaArtName = 'Delta-Package' }
 $pubCa = Test-InputBool (Get-TaskInput -Name 'publishCodeAnalyzerArtifact')
@@ -560,7 +562,7 @@ $resolved = $operationMode
 if ($operationMode -eq 'auto') {
     if ($buildReason -eq 'PullRequest' -or $prId) {
         if (-not (Test-BranchNameEquals -A $prTargetName -B $targetBranch)) {
-            Write-Host "##[command]Auto: skipping validation — PR target branch is '$prTargetName'; this task is configured for PRs that target '$targetBranch' only."
+            Write-Host "##[command]Auto: skipping validation - PR target branch is '$prTargetName'; this task is configured for PRs that target '$targetBranch' only."
             exit 0
         }
         $resolved = 'validate'
@@ -569,9 +571,12 @@ if ($operationMode -eq 'auto') {
         $resolved = 'deploy'
     }
     else {
-        Write-Host "##[command]Auto: skipping — pipeline branch is '$buildBranchName'; deploy runs only when the build runs on '$targetBranch' after merge (not a PR build)."
+        Write-Host "##[command]Auto: skipping - pipeline branch is '$buildBranchName'; deploy runs only when the build runs on '$targetBranch' after merge (not a PR build)."
         exit 0
     }
+}
+elseif ($resolved -ne 'validate' -and $resolved -ne 'deploy') {
+    throw "Unsupported operationMode '$operationMode'. Use auto, validate, or deploy."
 }
 
 Write-Host "##[section]Salesforce org validate/deploy (delta) | mode=$resolved | sources=$root"
