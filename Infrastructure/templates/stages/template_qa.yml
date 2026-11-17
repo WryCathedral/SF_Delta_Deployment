@@ -1,0 +1,26 @@
+#################################################################################################
+# Stage Name    : Salesforce-Build                                                          #
+# Functionality : Builds the salesforce code for PR and CI                                      #
+# Tasks         : Calls job templates for various tasks.                                        #
+#################################################################################################
+
+## Stage  
+stages:
+  - stage: Validate_and_Deploy
+    pool: 
+      vmImage: 'ubuntu-latest'
+    dependsOn: []
+    variables:
+      - template: "../../variables/qa-deployment-user.yml"
+      - template: "../../variables/sf-cli-versions.yml"
+
+## Calling the job template with parameters
+    jobs:
+      - template: "../jobs/build-qa.yml"
+        parameters:
+          client_id: $(client_id)
+          alias: $(alias)
+          username: $(username)
+          instance_url: $(instance_url)
+          sf_cli_version: $(ubuntu_sf_cli_version)
+          isdevhub: $(isdevhub)

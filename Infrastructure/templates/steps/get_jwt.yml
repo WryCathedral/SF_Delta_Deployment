@@ -1,0 +1,13 @@
+steps:
+  - task: DownloadSecureFile@1
+    name: jwttoken
+    displayName: 'Download JWT'
+    inputs:
+        secureFile: 'privatekey.key'
+   
+  - task: CopyFiles@2
+    displayName: 'Copy JWT from Temp Directory to Source Directory'
+    inputs:
+        SourceFolder: '$(Agent.TempDirectory)'
+        Contents: 'privatekey.key'
+        TargetFolder: '$(Build.SourcesDirectory)'

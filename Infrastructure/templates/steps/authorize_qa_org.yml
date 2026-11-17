@@ -1,0 +1,19 @@
+parameters:
+  - name: username
+    type: string
+  - name: client_id
+    type: string
+  - name: alias
+    type: string
+  - name: isdevhub
+    type: string
+  - name: instance_url
+    type: string
+
+steps:
+  - task: Bash@3
+    displayName: Authorize Deployment User with QA sandbox
+    inputs:
+      targetType: 'filePath'
+      filePath: ./Infrastructure/scripts/authenticate_org.sh
+      arguments: ${{ parameters.username }} ${{ parameters.isdevhub }} ${{ parameters.client_id }} ${{ parameters.instance_url }} ${{ parameters.alias }} '$(Build.SourcesDirectory)/privatekey.key'

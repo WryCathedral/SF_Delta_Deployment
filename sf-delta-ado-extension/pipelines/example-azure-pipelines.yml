@@ -1,0 +1,74 @@
+# Example: PR validation + post-merge deploy using the custom task extension.
+# 1. Install the extension in your organization.
+# 2. Replace YOUR_PUBLISHER_ID with your publisher id from vss-extension.json.
+# 3. Create a variable group with org credentials (JWT or Auth URL).
+# 4. For JWT: upload the private key as a Secure File.
+# 5. For Auth URL: upload a secure file with the force://... URL, or set secret $(sfdx_auth_url).
+# 6. Optional: commit a PMD ruleset XML and set useCustomPmdRuleset + pmdRulesetPath.
+
+trigger:
+  branches:
+    include:
+      - develop
+
+pr:
+  branches:
+    include:
+      - develop
+
+variables:
+  - group: QA-Org
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+    fetchDepth: 0
+
+  - task: DownloadSecureFile@1
+    name: jwtkey
+    displayName: Download JWT private key
+    inputs:
+      secureFile: 'your-jwt-private-key.pem'
+
+  # After the extension is installed in the org, use the short task name (same pattern as other Marketplace tasks).
+  # Full form (optional, only if names collide): YourPublisher.sf-delta-pipeline-extension.SfOrgValidateDeploy@1
+  - task: SfOrgValidateDeploy@1
+    displayName: Salesforce org validate & deploy (delta)
+    inputs:
+      operationMode: auto
+      alias: $(alias)
+      authMethod: jwt
+      orgType: sandbox
+      client_id: $(client_id)
+      username: $(username)
+      # instance_url: optional override; blank uses orgType host
+      jwt_key_file: $(jwtkey.secureFilePath)
+      targetBranch: develop
+      validateTestLevel: NoTestRun
+      deployTestLevel: NoTestRun
+      deployWaitTime: '120'
+      ignoreWarnings: false
+      ignoreConflicts: true
+      runCodeAnalyzer: false
+      useCustomPmdRuleset: false
+      # When runCodeAnalyzer: true and useCustomPmdRuleset: true, set:
+      # pmdRulesetPath: pmd/ruleset.xml
+      publishDeltaArtifact: true
+      deltaArtifactName: $(Build.DefinitionName)-Delta-Package
+      publishCodeAnalyzerArtifact: false
+      codeAnalyzerArtifactName: $(Build.DefinitionName)-sf-code-analyzer
+
+  # --- Auth URL example (alternative to JWT) ---
+  # - task: DownloadSecureFile@1
+  #   name: authurl
+  #   inputs:
+  #     secureFile: 'sfdx-auth-url.txt'
+  # - task: SfOrgValidateDeploy@1
+  #   inputs:
+  #     operationMode: auto
+  #     alias: $(alias)
+  #     authMethod: authUrl
+  #     sfdx_auth_url_file: $(authurl.secureFilePath)
+  #     targetBranch: develop

@@ -1,0 +1,13 @@
+steps:
+- task: PowerShell@2
+  displayName: 'Run Salesforce Code Analyzer'
+  enabled: true
+  inputs:
+    targetType: filePath
+    filePath: ./Infrastructure/scripts/run_sf_code_analyzer_on_delta.ps1
+- task: PublishPipelineArtifact@1
+  displayName: "Publish Code Analyzer reports"
+  inputs:
+    targetPath: "reports"
+    artifact: "sf-code-analyzer"
+    publishLocation: "pipeline"

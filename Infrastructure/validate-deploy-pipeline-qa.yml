@@ -1,0 +1,49 @@
+#################################################################################################################################
+# Pipeline Name : Validate and Deploy to QA sandbox.                                          
+# Functionality : Validate and deploy delta in the pull request to QA sanbox.           
+# Trigger       : Create Pull Request with Develop as target branch, Commit changes in the Feature Branch and Merge Pull Request.                          
+#################################################################################################################################
+
+## triggers for pipeline
+trigger:
+  branches:
+    include:
+    - refs/heads/develop
+
+## Exclude changes for the files and folders mentioned under paths
+  paths:
+    exclude:
+      - README.md
+      - /Infrastructure
+
+## build/pipeline run naming format (Validate or Deploy_Source Branch Name_$(Date:yyyyMMdd)$(Rev:.r))
+variables:
+- name: runLabel
+  ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
+    value: Validate
+  ${{ if and(ne(variables['Build.Reason'],'PullRequest'), eq(variables['Build.SourceBranchName'], 'develop')) }}:
+    value: Deploy
+
+# Determine which branch name to display
+- name: branchDisplay
+  ${{ if eq(variables['Build.Reason'], 'PullRequest') }}:
+    value: $[ replace(variables['System.PullRequest.TargetBranch'], 'refs/heads/', '') ]
+  ${{ if ne(variables['Build.Reason'], 'PullRequest') }}:
+    value: $[ replace(variables['Build.SourceBranch'], 'refs/heads/', '') ]
+
+# Determine the datetime of when the pipeline is running 
+- name: BuildDate
+  value: $[ format('{0:yyyyMMdd}', pipeline.startTime) ]
+
+# ===============================
+# Build name
+# ===============================
+# Name format:
+# Validate_develop_20251015.1  (for PR validation)
+# Deploy_develop_20251015.1    (for post-merge deploy)
+
+name: '$(runLabel)_$(branchDisplay)_$(BuildDate)_$(Rev:r)'
+
+## Start executing stages
+stages:
+  - template: templates/stages/template_qa.yml

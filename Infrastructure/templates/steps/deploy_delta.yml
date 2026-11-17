@@ -1,0 +1,11 @@
+parameters:
+  - name: alias
+    type: string
+steps:
+- task: PowerShell@2
+  displayName: 'Deploy delta in the target Org'
+  enabled: true
+  inputs:
+    targetType: filePath
+    filePath: ./Infrastructure/scripts/deploy_delta.ps1
+    arguments: ${{ parameters.alias }}

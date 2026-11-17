@@ -1,0 +1,12 @@
+parameters:
+  - name: alias
+    type: string
+steps:
+- task: PowerShell@2
+# condition: and(succeeded(), ne(variables['componentsPresent'], 'no'))
+  displayName: 'Deploy Salesforce'
+  enabled: true
+  inputs:
+    targetType: filePath
+    filePath: ./Infrastructure/scripts/deploy_full_Salesforce.ps1
+    arguments: ${{ parameters.alias }}
