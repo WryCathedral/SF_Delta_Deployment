@@ -1,7 +1,0 @@
-steps:
-- task: PowerShell@2
-  displayName: 'Install Salesforce Code Analyzer'
-  enabled: true
-  inputs:
-    targetType: filePath
-    filePath: ./Infrastructure/scripts/install_sf_code_analyzer.ps1

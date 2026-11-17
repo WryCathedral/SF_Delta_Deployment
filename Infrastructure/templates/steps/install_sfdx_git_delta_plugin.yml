@@ -1,7 +1,0 @@
-steps:
-- task: PowerShell@2
-  displayName: 'Install SFDX Git Delta Plugin'
-  enabled: true
-  inputs:
-    targetType: filePath
-    filePath: ./Infrastructure/scripts/install_sfdx_git_delta_plugin.ps1
