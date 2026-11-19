@@ -1,6 +1,6 @@
 # Example: PR validation + post-merge deploy using the custom task extension.
 # 1. Install the extension in your organization.
-# 2. Replace YOUR_PUBLISHER_ID with your publisher id from vss-extension.json.
+# 2. Publisher id is GouravPragvamsaPwC (vss-extension.json).
 # 3. Create a variable group with org credentials (JWT or Auth URL).
 # 4. For JWT: upload the private key as a Secure File.
 # 5. For Auth URL: upload a secure file with the force://... URL, or set secret $(sfdx_auth_url).

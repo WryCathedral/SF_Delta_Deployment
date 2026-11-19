@@ -15,9 +15,9 @@
   "version": {
     "Major": 1,
     "Minor": 0,
-    "Patch": 0
+    "Patch": 1
   },
-  "minimumAgentVersion": "2.144.0",
+  "minimumAgentVersion": "4.248.0",
   "instanceNameFormat": "Salesforce org $(operationMode)",
   "groups": [
     {
@@ -381,10 +381,13 @@
     }
   ],
   "execution": {
-    "PowerShell3": {
-      "target": "sf-delta.ps1",
-      "argumentFormat": "",
-      "workingDirectory": "$(currentDirectory)"
+    "Node20_1": {
+      "target": "run.js",
+      "argumentFormat": ""
+    },
+    "Node24": {
+      "target": "run.js",
+      "argumentFormat": ""
     }
   }
 }
