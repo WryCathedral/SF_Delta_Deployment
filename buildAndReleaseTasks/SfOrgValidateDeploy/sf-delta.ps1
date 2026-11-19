@@ -46,8 +46,15 @@ function Invoke-Checked {
 
 function Install-SfCli {
     param([string]$Version)
-    Write-Host "##[section]Install Salesforce CLI $Version"
-    Invoke-Checked -Exe 'npm' -Arguments @('install', '--global', "@salesforce/cli@$Version") -DisplayName 'npm install @salesforce/cli'
+    $spec = '@salesforce/cli@latest'
+    if (-not [string]::IsNullOrWhiteSpace($Version)) {
+        $trimmed = $Version.Trim()
+        if ($trimmed -notin @('latest', 'stable')) {
+            $spec = "@salesforce/cli@$trimmed"
+        }
+    }
+    Write-Host "##[section]Install Salesforce CLI $spec"
+    Invoke-Checked -Exe 'npm' -Arguments @('install', '--global', $spec) -DisplayName "npm install -g $spec"
     Invoke-Checked -Exe 'sf' -Arguments @('--version') -DisplayName 'sf --version'
 }
 
@@ -313,6 +320,26 @@ function Add-DeployTestLevelArgs {
     }
 }
 
+function Invoke-SfDeployStart {
+    param(
+        [string[]]$Arguments,
+        [string]$FailureMessage
+    )
+    Write-Host "##[section]sf $($Arguments -join ' ')"
+    $lines = & sf @Arguments 2>&1
+    $code = $LASTEXITCODE
+    foreach ($line in @($lines)) { Write-Host $line }
+    if ($code -eq 0) { return }
+    $text = @($lines) | Out-String
+    # CLI older than 2.98 cannot format the Winter '26 "Finalizing" status and exits 1
+    # after the org has already accepted the deploy.
+    if ($text -match 'metadata\.transfer:Finalizing') {
+        Write-Host "##[warning]Salesforce CLI exited $code while formatting the Finalizing status. Checking the org deploy report before failing the step."
+        return
+    }
+    throw "$FailureMessage Command failed (${code}): sf $($Arguments -join ' ')"
+}
+
 function Test-DeployReportSucceeded {
     param(
         [string]$Alias,
@@ -347,7 +374,7 @@ function Invoke-DeltaValidate {
     Add-DeployTestLevelArgs -ArgsList $args -TestLevel $TestLevel -SpecifiedTests $SpecifiedTests
     if ($IgnoreWarnings) { $args.Add('--ignore-warnings') }
     $args.AddRange([string[]]@('--dry-run', '--wait', $WaitMinutes, '--verbose'))
-    Invoke-Checked -Exe 'sf' -Arguments @($args.ToArray())
+    Invoke-SfDeployStart -Arguments @($args.ToArray()) -FailureMessage 'Delta validation (dry-run) failed.'
     if (-not (Test-DeployReportSucceeded -Alias $Alias -WaitMinutes $WaitMinutes)) {
         throw 'Delta validation (dry-run) did not succeed.'
     }
@@ -375,7 +402,7 @@ function Invoke-DeltaDeploy {
     Add-DeployTestLevelArgs -ArgsList $args -TestLevel $TestLevel -SpecifiedTests $SpecifiedTests
     if ($IgnoreWarnings) { $args.Add('--ignore-warnings') }
     $args.AddRange([string[]]@('--wait', $WaitMinutes, '--verbose'))
-    Invoke-Checked -Exe 'sf' -Arguments @($args.ToArray())
+    Invoke-SfDeployStart -Arguments @($args.ToArray()) -FailureMessage 'Delta deployment failed.'
     if (-not (Test-DeployReportSucceeded -Alias $Alias -WaitMinutes $WaitMinutes)) {
         throw 'Delta deployment did not succeed.'
     }
@@ -510,14 +537,30 @@ function Test-CodeAnalyzerSeverityGate {
 function Publish-PipelineArtifactFromFolder {
     param(
         [string]$FolderPath,
-        [string]$ArtifactName
+        [string]$ArtifactName,
+        [string]$ContainerFolder
     )
     if (-not (Test-Path -LiteralPath $FolderPath)) {
         Write-Host "##[warning]Artifact folder missing: $FolderPath"
         return
     }
-    $full = (Resolve-Path -LiteralPath $FolderPath).Path
-    Write-Host "##vso[artifact.upload containerfolder=$full;artifactname=$ArtifactName;artifacttype=container;]$full"
+    if ([string]::IsNullOrWhiteSpace($ContainerFolder)) { $ContainerFolder = 'Artifact' }
+    $rootFull = (Resolve-Path -LiteralPath $FolderPath).Path.TrimEnd('\', '/')
+    $files = @(Get-ChildItem -LiteralPath $rootFull -File -Recurse)
+    if ($files.Count -eq 0) {
+        Write-Host "##[warning]No files to publish in $FolderPath"
+        return
+    }
+    foreach ($file in $files) {
+        $relative = $file.FullName.Substring($rootFull.Length).TrimStart('\', '/')
+        $relativeDir = [IO.Path]::GetDirectoryName($relative)
+        $folder = $ContainerFolder
+        if (-not [string]::IsNullOrWhiteSpace($relativeDir)) {
+            $folder = $ContainerFolder + '/' + ($relativeDir.Replace('\', '/'))
+        }
+        Write-Host "Publishing $($file.Name) to $ArtifactName/$folder"
+        Write-Host "##vso[artifact.upload containerfolder=$folder;artifactname=$ArtifactName;artifacttype=container;]$($file.FullName)"
+    }
 }
 
 $root = $env:BUILD_SOURCESDIRECTORY
@@ -542,7 +585,6 @@ $sfdxAuthUrlFile = Get-TaskInput -Name 'sfdx_auth_url_file'
 $sfdxAuthUrl = Get-TaskInput -Name 'sfdx_auth_url'
 
 $sfVer = Get-TaskInput -Name 'sfCliVersion'
-if ([string]::IsNullOrWhiteSpace($sfVer)) { $sfVer = '2.70.1' }
 
 $skipCli = Test-InputBool (Get-TaskInput -Name 'skipInstallSfCli')
 $fromRef = Get-TaskInput -Name 'deltaFromRef'
@@ -661,7 +703,7 @@ try {
             Test-CodeAnalyzerSeverityGate -CsvPath $reportCsv -MaxAllowedSeverity $maxAllowed
         }
         if ($pubCa) {
-            Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'reports') -ArtifactName $caArtName
+            Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'reports') -ArtifactName $caArtName -ContainerFolder 'Code-Analyzer'
         }
     }
 
@@ -675,7 +717,7 @@ try {
     }
 
     if ($pubDelta) {
-        Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'artifacts') -ArtifactName $deltaArtName
+        Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'artifacts') -ArtifactName $deltaArtName -ContainerFolder 'Delta-Package'
     }
 }
 catch {

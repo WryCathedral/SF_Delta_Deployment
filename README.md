@@ -79,7 +79,7 @@ steps:
       secureFile: your-jwt-private-key.pem
 
   - task: SfOrgValidateDeploy@1
-    displayName: Salesforce org validate and deploy (delta)
+    displayName: Salesforce Org Validate & Deploy (Delta)
     inputs:
       operationMode: auto
       alias: $(alias)

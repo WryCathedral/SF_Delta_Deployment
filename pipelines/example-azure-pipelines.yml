@@ -35,7 +35,7 @@ steps:
   # After the extension is installed in the org, use the short task name (same pattern as other Marketplace tasks).
   # Full form (optional, only if names collide): YourPublisher.sf-delta-pipeline-extension.SfOrgValidateDeploy@1
   - task: SfOrgValidateDeploy@1
-    displayName: Salesforce org validate & deploy (delta)
+    displayName: Salesforce Org Validate & Deploy (Delta)
     inputs:
       operationMode: auto
       alias: $(alias)
