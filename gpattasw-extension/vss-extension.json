@@ -1,0 +1,40 @@
+{
+  "manifestVersion": 1,
+  "id": "sf-delta-pipeline-extension",
+  "publisher": "gpattasw",
+  "version": "1.0.0",
+  "name": "Salesforce Delta Pipeline",
+  "description": "Validate and deploy Salesforce metadata deltas (sfdx-git-delta) with optional Code Analyzer (default or custom PMD), JWT or SFDX Auth URL login, and artifact publishing.",
+  "categories": ["Azure Pipelines"],
+  "icons": {
+    "default": "images/extension-icon.png"
+  },
+  "content": {
+    "details": {
+      "path": "README.md"
+    }
+  },
+  "files": [
+    {
+      "path": "buildAndReleaseTasks"
+    },
+    {
+      "path": "images"
+    }
+  ],
+  "targets": [
+    {
+      "id": "Microsoft.VisualStudio.Services"
+    }
+  ],
+  "contributions": [
+    {
+      "id": "sf-delta-pipeline-task",
+      "type": "ms.vss-distributed-task.task",
+      "targets": ["ms.vss-distributed-task.tasks"],
+      "properties": {
+        "name": "buildAndReleaseTasks/SfOrgValidateDeploy"
+      }
+    }
+  ]
+}
