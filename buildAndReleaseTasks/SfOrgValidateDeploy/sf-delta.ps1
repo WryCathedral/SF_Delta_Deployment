@@ -58,16 +58,56 @@ function Test-IsWindowsOs {
     return [System.Runtime.InteropServices.RuntimeInformation]::IsOSPlatform([System.Runtime.InteropServices.OSPlatform]::Windows)
 }
 
+function Get-SfPluginAllowListName {
+    param([string]$PluginSpec)
+    $spec = $PluginSpec.Trim()
+    if ($spec.StartsWith('@')) {
+        $secondAt = $spec.IndexOf('@', 1)
+        if ($secondAt -gt 0) { return $spec.Substring(0, $secondAt) }
+        return $spec
+    }
+    $at = $spec.IndexOf('@')
+    if ($at -gt 0) { return $spec.Substring(0, $at) }
+    return $spec
+}
+
+function Add-UnsignedPluginAllowList {
+    param([string]$PluginName)
+    # Piping "yes" into sf plugins install crashes the CLI on Node 24 (write EINVAL).
+    # An allowlisted name installs with no trust prompt.
+    $dirs = New-Object System.Collections.Generic.List[string]
+    $dirs.Add((Join-Path $HOME '.config/sf'))
+    if ((Test-IsWindowsOs) -and -not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        $localDir = Join-Path $env:LOCALAPPDATA 'sf'
+        if ($dirs -notcontains $localDir) { $dirs.Add($localDir) }
+    }
+    foreach ($dir in $dirs) {
+        if (-not (Test-Path -LiteralPath $dir)) {
+            New-Item -ItemType Directory -Force -Path $dir | Out-Null
+        }
+        $file = Join-Path $dir 'unsignedPluginAllowList.json'
+        $names = @()
+        if (Test-Path -LiteralPath $file) {
+            try {
+                $existing = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+                if ($null -ne $existing) { $names = @($existing) }
+            }
+            catch {
+                $names = @()
+            }
+        }
+        if ($names -notcontains $PluginName) { $names += $PluginName }
+        $escaped = $names | ForEach-Object { '"' + (($_ -replace '\\', '\\') -replace '"', '\"') + '"' }
+        Set-Content -LiteralPath $file -Value ('[' + ($escaped -join ',') + ']') -Encoding ascii
+        Write-Host "Allowlisted unsigned plugin '$PluginName' in $file"
+    }
+}
+
 function Invoke-SfPluginInstallNonInteractive {
     param([string]$PluginSpec)
-    $isWin = Test-IsWindowsOs
-    if ($isWin) {
-        cmd /c "echo y| sf plugins install $PluginSpec"
-    }
-    else {
-        bash -c "yes | sf plugins install $PluginSpec"
-    }
-    if ($LASTEXITCODE -ne 0) { throw "sf plugins install failed ($LASTEXITCODE): $PluginSpec" }
+    $allowName = Get-SfPluginAllowListName -PluginSpec $PluginSpec
+    Add-UnsignedPluginAllowList -PluginName $allowName
+    Invoke-Checked -Exe 'sf' -Arguments @('plugins', 'install', $PluginSpec) -DisplayName "sf plugins install $PluginSpec"
 }
 
 function Install-SfdxGitDeltaPlugin {
