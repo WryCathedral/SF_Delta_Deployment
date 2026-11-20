@@ -1,7 +1,23 @@
-# Example: PR validation + post-merge deploy.
-# The task downloads the secure file, fetches history when the checkout is shallow,
-# and publishes artifacts even when validation or Code Analyzer fails.
-# Stages and jobs stay in this pipeline. A task cannot add them.
+# PR validation + post-merge deploy for SfOrgValidateDeploy@1 (extension 1.0.6).
+#
+# Setup: docs/azure-devops-setup.md
+#
+# Required for this JWT + auto example:
+#   operationMode, alias, authMethod, orgType, client_id, username,
+#   jwtKeySecureFile, targetBranch, validateTestLevel, deployTestLevel
+#
+# The variable group must define alias, client_id, and username.
+# jwtKeySecureFile is the secure file name under Pipelines → Library → Secure files.
+# Authorize the pipeline for that group and that secure file.
+#
+# Conditional inputs stay commented until you turn that mode on:
+#   - Auth URL inputs when authMethod is authUrl
+#   - validateSpecifiedTests / deploySpecifiedTests when the test level is RunSpecifiedTests
+#   - pmdRulesetPath when runCodeAnalyzer and useCustomPmdRuleset are both true
+#
+# auto: a PR that targets targetBranch validates; a non-PR build on that branch deploys.
+# Code Analyzer runs only on validation. The task publishes artifacts even when
+# validation, deployment, or the scan fails. A task cannot add stages or jobs.
 
 trigger:
   branches:
@@ -19,28 +35,69 @@ variables:
 pool:
   vmImage: ubuntu-latest
 
-steps:
-  - checkout: self
+jobs:
+  - job: SalesforceDelta
+    displayName: Salesforce delta validate or deploy
+    # deployWaitTime is 120 minutes. Keep the job timeout above that.
+    timeoutInMinutes: 180
+    steps:
+      - checkout: self
+        persistCredentials: true
 
-  - task: SfOrgValidateDeploy@1
-    displayName: Salesforce Org Validate & Deploy (Delta)
-    inputs:
-      operationMode: auto
-      alias: $(alias)
-      authMethod: jwt
-      orgType: sandbox
-      client_id: $(client_id)
-      username: $(username)
-      jwtKeySecureFile: your-jwt-private-key.pem
-      targetBranch: develop
-      validateTestLevel: NoTestRun
-      deployTestLevel: NoTestRun
-      deployWaitTime: '120'
-      ignoreWarnings: false
-      ignoreConflicts: true
-      runCodeAnalyzer: false
-      useCustomPmdRuleset: false
-      publishDeltaArtifact: true
-      deltaArtifactName: $(Build.DefinitionName)-Delta-Package
-      publishCodeAnalyzerArtifact: false
-      codeAnalyzerArtifactName: $(Build.DefinitionName)-Code-Analyzer
+      - task: SfOrgValidateDeploy@1
+        displayName: Salesforce Org Validate & Deploy (Delta)
+        inputs:
+          # Operation
+          operationMode: auto
+          targetBranch: develop
+
+          # Authentication — JWT
+          alias: $(alias)
+          authMethod: jwt
+          orgType: sandbox
+          client_id: $(client_id)
+          username: $(username)
+          instance_url: ''
+          jwtKeySecureFile: your-jwt-private-key.pem
+          jwt_key_file: ''
+          jwt_token_path: ''
+
+          # Authentication — SFDX Auth URL.
+          # Set authMethod to authUrl and uncomment one of these. JWT inputs are then unused.
+          # sfdxAuthUrlSecureFile: your-auth-url.txt
+          # sfdx_auth_url_file: ''
+          # sfdx_auth_url: $(sfdx_auth_url)
+
+          # Delta and CLI
+          sfCliVersion: ''
+          skipInstallSfCli: false
+          deltaFromRef: HEAD~1
+          deltaToRef: HEAD
+          ignoreFile: ''
+
+          # Apex tests
+          validateTestLevel: NoTestRun
+          # validateSpecifiedTests: MyClassTest,MyOtherTest
+          deployTestLevel: NoTestRun
+          # deploySpecifiedTests: MyClassTest,MyOtherTest
+          codeCoveragePercent: ''
+
+          # Deploy / validate options
+          deployWaitTime: '120'
+          ignoreWarnings: false
+          ignoreConflicts: true
+
+          # Code Analyzer — validation only
+          runCodeAnalyzer: false
+          useCustomPmdRuleset: false
+          # pmdRulesetPath: config/pmd-ruleset.xml
+          codeAnalyzerRuleSelector: all
+          codeAnalyzerSeverityThreshold: '2'
+          enforceSeverityGate: true
+          maxAllowedSeverity: '2'
+
+          # Artifacts
+          publishDeltaArtifact: true
+          deltaArtifactName: $(Build.DefinitionName)-Delta-Package
+          publishCodeAnalyzerArtifact: false
+          codeAnalyzerArtifactName: $(Build.DefinitionName)-Code-Analyzer
