@@ -281,6 +281,15 @@
       "helpMarkDown": "Comma-separated Apex test class names for deployment."
     },
     {
+      "name": "codeCoveragePercent",
+      "type": "string",
+      "label": "Minimum Apex code coverage percent",
+      "defaultValue": "",
+      "required": false,
+      "groupName": "tests",
+      "helpMarkDown": "Leave blank to require 75% coverage on every Apex class, which is the Salesforce production default. Enter `85` to fail validation or deployment when any class is below 85%. The check is skipped when the test level is NoTestRun."
+    },
+    {
       "name": "deployWaitTime",
       "type": "string",
       "label": "Deploy wait time (minutes)",

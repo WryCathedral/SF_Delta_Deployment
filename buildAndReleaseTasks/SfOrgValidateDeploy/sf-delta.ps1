@@ -70,7 +70,7 @@ function Install-SfCli {
     Write-Host "##[section]Install Salesforce CLI $spec"
     Invoke-Checked -Exe 'npm' -Arguments @('install', '--global', $spec) -DisplayName "npm install -g $spec"
     Invoke-Checked -Exe 'sf' -Arguments @('--version') -DisplayName 'sf --version'
-    Write-StepBanner 'cli installation completed'
+    Write-StepBanner 'Salesforce CLI installation completed successfully.'
 }
 
 function Test-IsWindowsOs {
@@ -136,14 +136,14 @@ function Install-SfdxGitDeltaPlugin {
     Write-Host "##[section]Install sfdx-git-delta plugin"
     Invoke-SfPluginInstallNonInteractive -PluginSpec 'sfdx-git-delta@stable'
     & sf plugins
-    Write-StepBanner 'sfdx-git-delta plugin installation completed'
+    Write-StepBanner 'The sfdx-git-delta plugin installed successfully.'
 }
 
 function Install-CodeAnalyzerPlugin {
     Write-Host "##[section]Install code-analyzer plugin"
     Invoke-SfPluginInstallNonInteractive -PluginSpec 'code-analyzer'
     & sf plugins
-    Write-StepBanner 'code analyzer plugin installation completed'
+    Write-StepBanner 'The Code Analyzer plugin installed successfully.'
 }
 
 function Resolve-JwtInstanceUrl {
@@ -249,7 +249,7 @@ function Connect-SfOrg {
             throw "Unsupported authMethod '$AuthMethod'. Use jwt or authUrl."
         }
     }
-    Write-StepBanner 'org authorization completed'
+    Write-StepBanner 'The pipeline authenticated to the Salesforce org.'
 }
 
 function Resolve-IgnoreFileArg {
@@ -291,7 +291,7 @@ function Invoke-SgdDelta {
     if (-not (Test-Path (Join-Path $SourcesRoot 'package/package.xml'))) {
         throw "package/package.xml not found after delta. Check git history and paths."
     }
-    Write-StepBanner 'delta generation completed'
+    Write-StepBanner 'The metadata delta package was generated from the git range.'
 }
 
 function Copy-DeltaArtifacts {
@@ -390,10 +390,44 @@ function Get-SfDeployStatus {
     }
     if ($status -eq 'Cancelled') { $status = 'Canceled' }
     if ([string]::IsNullOrWhiteSpace($status)) {
-        if ($CommandOutput -match 'metadata\.transfer:Finalizing') { return 'Unknown' }
-        return 'Failed'
+        if ($CommandOutput -match 'metadata\.transfer:Finalizing') { $status = 'Unknown' }
+        else { $status = 'Failed' }
     }
-    return $status
+    return [pscustomobject]@{ Status = $status; Report = $report }
+}
+
+function Test-ApexClassCoverage {
+    param(
+        $Report,
+        [int]$MinimumPercent,
+        [string]$TestLevel
+    )
+    if ($TestLevel -eq 'NoTestRun') { return $true }
+    $rows = $null
+    if ($Report -and $Report.result -and $Report.result.details -and $Report.result.details.runTestResult -and $Report.result.details.runTestResult.codeCoverage) {
+        $rows = @($Report.result.details.runTestResult.codeCoverage)
+    }
+    if (-not $rows -or $rows.Count -eq 0) {
+        Write-Host "##[warning]The deploy report did not include per-class Apex coverage, so the $MinimumPercent% coverage check was skipped."
+        return $true
+    }
+    $passed = $true
+    foreach ($row in $rows) {
+        $locations = 0
+        $uncovered = 0
+        [void][int]::TryParse([string]$row.numLocations, [ref]$locations)
+        [void][int]::TryParse([string]$row.numLocationsNotCovered, [ref]$uncovered)
+        if ($locations -le 0) { continue }
+        $covered = $locations - $uncovered
+        $pct = [int][math]::Floor(($covered / $locations) * 100)
+        $name = [string]$row.name
+        Write-Host "Apex coverage for ${name}: ${pct}% (${covered}/${locations} lines)."
+        if ($pct -lt $MinimumPercent) {
+            $passed = $false
+            Write-Host "##[error]$name coverage is $pct%, which is below the required $MinimumPercent%."
+        }
+    }
+    return $passed
 }
 
 function Invoke-SfOrgDeploy {
@@ -407,7 +441,8 @@ function Invoke-SfOrgDeploy {
         [string]$WaitMinutes,
         [bool]$IgnoreWarnings,
         [bool]$IgnoreConflicts,
-        [bool]$DryRun
+        [bool]$DryRun,
+        [int]$MinimumCoverage
     )
     if ([string]::IsNullOrWhiteSpace($WaitMinutes)) { $WaitMinutes = '120' }
     $args = [System.Collections.Generic.List[string]]::new()
@@ -431,18 +466,25 @@ function Invoke-SfOrgDeploy {
         Write-Host "##[warning]Salesforce CLI exited $code while formatting the Finalizing status. The org result is read from the deploy report."
     }
 
-    $status = Get-SfDeployStatus -Alias $Alias -WaitMinutes $WaitMinutes -CommandOutput $text
-    if ($status -eq 'Unknown') {
-        $status = Get-SfDeployStatus -Alias $Alias -WaitMinutes $WaitMinutes -CommandOutput ''
+    $outcome = Get-SfDeployStatus -Alias $Alias -WaitMinutes $WaitMinutes -CommandOutput $text
+    if ($outcome.Status -eq 'Unknown') {
+        $outcome = Get-SfDeployStatus -Alias $Alias -WaitMinutes $WaitMinutes -CommandOutput ''
     }
-    $verb = switch ($status) {
-        'Succeeded' { 'succeeded' }
-        'Canceled' { 'canceled' }
-        default { 'failed' }
+    $coverageOk = $true
+    if ($outcome.Status -eq 'Succeeded') {
+        $coverageOk = Test-ApexClassCoverage -Report $outcome.Report -MinimumPercent $MinimumCoverage -TestLevel $TestLevel
     }
-    Write-StepBanner "$ActionName $verb"
-    if ($status -ne 'Succeeded') {
-        throw "$ActionName $verb"
+    $sentence = switch ($outcome.Status) {
+        'Succeeded' {
+            if ($coverageOk) { "$ActionName succeeded in the target org." }
+            else { "$ActionName failed because one or more Apex classes are below $MinimumCoverage% code coverage." }
+        }
+        'Canceled' { "$ActionName was canceled in the target org." }
+        default { "$ActionName failed in the target org." }
+    }
+    Write-StepBanner $sentence
+    if ($outcome.Status -ne 'Succeeded' -or -not $coverageOk) {
+        throw $sentence
     }
 }
 
@@ -528,7 +570,7 @@ function Invoke-CodeAnalyzerOnDelta {
     }
 
     Invoke-Checked -Exe 'sf' -Arguments @($args.ToArray()) -DisplayName 'sf code-analyzer run (delta workspace)'
-    Write-StepBanner 'code analyzer completed'
+    Write-StepBanner 'Code Analyzer finished scanning the delta metadata.'
 }
 
 function ConvertTo-SeverityNumber {
@@ -569,7 +611,7 @@ function Test-CodeAnalyzerSeverityGate {
     if ($failed.Count -gt 0) {
         $msg = "Code Analyzer: $($failed.Count) finding(s) exceed max allowed severity ($MaxAllowedSeverity)."
         Write-Host "##vso[task.logissue type=error]$msg"
-        Write-StepBanner 'code analyzer failed'
+        Write-StepBanner 'Code Analyzer failed because findings exceed the allowed severity.'
         throw $msg
     }
 }
@@ -655,6 +697,16 @@ $validateSpecifiedTests = Get-TaskInput -Name 'validateSpecifiedTests'
 $deployTestLevel = Get-TaskInput -Name 'deployTestLevel'
 if ([string]::IsNullOrWhiteSpace($deployTestLevel)) { $deployTestLevel = 'NoTestRun' }
 $deploySpecifiedTests = Get-TaskInput -Name 'deploySpecifiedTests'
+$codeCoverageRaw = Get-TaskInput -Name 'codeCoveragePercent'
+$minimumCoverage = 75
+if (-not [string]::IsNullOrWhiteSpace($codeCoverageRaw)) {
+    $parsedCoverage = 0
+    $coverageText = $codeCoverageRaw.Trim().TrimEnd('%')
+    if (-not [int]::TryParse($coverageText, [ref]$parsedCoverage) -or $parsedCoverage -lt 0 -or $parsedCoverage -gt 100) {
+        throw "Code coverage percent must be a whole number from 0 to 100. Received '$codeCoverageRaw'."
+    }
+    $minimumCoverage = $parsedCoverage
+}
 
 $deployWaitTime = Get-TaskInput -Name 'deployWaitTime'
 if ([string]::IsNullOrWhiteSpace($deployWaitTime)) { $deployWaitTime = '120' }
@@ -736,14 +788,14 @@ if (-not (Test-GitRef $fromRef)) {
 if (-not (Test-GitRef $toRef)) {
     throw "Git could not resolve '$toRef'."
 }
-Write-StepBanner 'git history ready'
+Write-StepBanner 'Git history is available for the delta comparison.'
 
 if (-not $skipCli) {
     Install-SfCli -Version $sfVer
 }
 else {
     if (-not (Get-Command sf -ErrorAction SilentlyContinue)) { throw 'sf CLI not found; uncheck skip install or pre-install CLI.' }
-    Write-StepBanner 'cli already installed'
+    Write-StepBanner 'Salesforce CLI is already present on the agent.'
 }
 
 Install-SfdxGitDeltaPlugin
@@ -773,11 +825,11 @@ try {
 
     if ($resolved -eq 'validate') {
         Write-Host "Validate test level: $validateTestLevel | wait=$deployWaitTime | ignoreWarnings=$ignoreWarnings"
-        Invoke-SfOrgDeploy -ActionName 'Validation' -Alias $alias -PackageXml $pkgXml -DestructiveXml $destXml -TestLevel $validateTestLevel -SpecifiedTests $validateSpecifiedTests -WaitMinutes $deployWaitTime -IgnoreWarnings $ignoreWarnings -IgnoreConflicts $false -DryRun $true
+        Invoke-SfOrgDeploy -ActionName 'Validation' -Alias $alias -PackageXml $pkgXml -DestructiveXml $destXml -TestLevel $validateTestLevel -SpecifiedTests $validateSpecifiedTests -WaitMinutes $deployWaitTime -IgnoreWarnings $ignoreWarnings -IgnoreConflicts $false -DryRun $true -MinimumCoverage $minimumCoverage
     }
     elseif ($resolved -eq 'deploy') {
         Write-Host "Deploy test level: $deployTestLevel | wait=$deployWaitTime | ignoreWarnings=$ignoreWarnings | ignoreConflicts=$ignoreConflicts"
-        Invoke-SfOrgDeploy -ActionName 'Deployment' -Alias $alias -PackageXml $pkgXml -DestructiveXml $destXml -TestLevel $deployTestLevel -SpecifiedTests $deploySpecifiedTests -WaitMinutes $deployWaitTime -IgnoreWarnings $ignoreWarnings -IgnoreConflicts $ignoreConflicts -DryRun $false
+        Invoke-SfOrgDeploy -ActionName 'Deployment' -Alias $alias -PackageXml $pkgXml -DestructiveXml $destXml -TestLevel $deployTestLevel -SpecifiedTests $deploySpecifiedTests -WaitMinutes $deployWaitTime -IgnoreWarnings $ignoreWarnings -IgnoreConflicts $ignoreConflicts -DryRun $false -MinimumCoverage $minimumCoverage
     }
 }
 catch {
@@ -787,7 +839,7 @@ finally {
     if ($pubCa) {
         try {
             if (Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'reports') -ArtifactName $caArtName -ContainerFolder 'Code-Analyzer') {
-                Write-StepBanner 'code analyzer artifact published'
+                Write-StepBanner 'The Code Analyzer report was published as a pipeline artifact.'
             }
         }
         catch {
@@ -797,7 +849,7 @@ finally {
     if ($pubDelta) {
         try {
             if (Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'artifacts') -ArtifactName $deltaArtName -ContainerFolder 'Delta-Package') {
-                Write-StepBanner 'delta artifact published'
+                Write-StepBanner 'The delta package was published as a pipeline artifact.'
             }
         }
         catch {
