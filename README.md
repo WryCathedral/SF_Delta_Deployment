@@ -1,6 +1,6 @@
 # Salesforce Delta Pipeline
 
-`SfOrgValidateDeploy` validates or deploys a Salesforce metadata delta. Install extension **1.0.2** from the `vsix` folder. The repository link in the task is [Salesforce Delta Pipeline](https://github.com/WryCathedral/SF_Delta_Deployment).
+`SfOrgValidateDeploy` validates or deploys a Salesforce metadata delta. Install extension **1.0.3** from the `vsix` folder. The repository link in the task is [Salesforce Delta Pipeline](https://github.com/WryCathedral/SF_Delta_Deployment).
 
 ## What the task does
 
@@ -42,7 +42,7 @@
 
 ## Set up a pipeline
 
-1. Install **1.0.2** in **Organization settings → Extensions**. If 1.0.2 is already installed, remove it and install this package again. Azure DevOps will not replace files while the version number stays 1.0.2.
+1. Install **1.0.3** in **Organization settings → Extensions**.
 2. Create a variable group, for example `QA-Org`, with `alias`, `client_id`, and `username`.
 3. Upload the JWT private key, or an Auth URL file, under **Pipelines → Library → Secure files**.
 4. Add `SfOrgValidateDeploy@1` and select that secure file on the task.

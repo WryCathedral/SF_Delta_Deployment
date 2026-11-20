@@ -687,9 +687,10 @@ $jwtPath = if (-not [string]::IsNullOrWhiteSpace($jwtTokenPath)) { $jwtTokenPath
     else { $jwtKeyFile }
 if (-not [string]::IsNullOrWhiteSpace($jwtPath)) {
     $jwtPath = $jwtPath.Trim().Trim('"')
-    if (-not (Test-Path -LiteralPath $jwtPath) -and $jwtPath.EndsWith(')') -and (Test-Path -LiteralPath $jwtPath.TrimEnd(')'))) {
-        Write-Host "##[warning]JWT path had a trailing ')'. Using $($jwtPath.TrimEnd(')'))."
-        $jwtPath = $jwtPath.TrimEnd(')')
+    $jwtPathWithoutParen = $jwtPath.TrimEnd([char]')')
+    if (-not (Test-Path -LiteralPath $jwtPath) -and $jwtPath.EndsWith(')') -and (Test-Path -LiteralPath $jwtPathWithoutParen)) {
+        Write-Host "##[warning]JWT path had a trailing parenthesis. Using $jwtPathWithoutParen."
+        $jwtPath = $jwtPathWithoutParen
     }
 }
 $sfdxAuthUrlFile = Get-TaskInput -Name 'sfdx_auth_url_file'

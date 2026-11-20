@@ -15,7 +15,7 @@
   "version": {
     "Major": 1,
     "Minor": 0,
-    "Patch": 2
+    "Patch": 3
   },
   "minimumAgentVersion": "4.248.0",
   "instanceNameFormat": "Salesforce Org Validate & Deploy (Delta)",
