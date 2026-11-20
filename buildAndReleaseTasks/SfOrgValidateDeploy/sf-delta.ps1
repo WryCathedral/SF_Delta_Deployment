@@ -58,6 +58,24 @@ function Invoke-Checked {
     }
 }
 
+function Get-SalesforceCliVersion {
+    $text = (& sf --version 2>&1 | Out-String).Trim()
+    Write-Host $text
+    if ($text -match '(\d+\.\d+\.\d+)') { return $Matches[1] }
+    return 'unknown'
+}
+
+function Get-SfPluginVersion {
+    param([string[]]$Names)
+    $text = (& sf plugins 2>&1 | Out-String)
+    Write-Host $text
+    foreach ($name in $Names) {
+        $pattern = '(?im)^\s*' + [regex]::Escape($name) + '\s+v?(\d+\.\d+\.\d+)'
+        if ($text -match $pattern) { return $Matches[1] }
+    }
+    return 'unknown'
+}
+
 function Install-SfCli {
     param([string]$Version)
     $spec = '@salesforce/cli@latest'
@@ -69,8 +87,8 @@ function Install-SfCli {
     }
     Write-Host "##[section]Install Salesforce CLI $spec"
     Invoke-Checked -Exe 'npm' -Arguments @('install', '--global', $spec) -DisplayName "npm install -g $spec"
-    Invoke-Checked -Exe 'sf' -Arguments @('--version') -DisplayName 'sf --version'
-    Write-StepBanner 'Salesforce CLI installation completed successfully.'
+    $cliVersion = Get-SalesforceCliVersion
+    Write-StepBanner "Salesforce CLI $cliVersion installed."
 }
 
 function Test-IsWindowsOs {
@@ -135,15 +153,15 @@ function Invoke-SfPluginInstallNonInteractive {
 function Install-SfdxGitDeltaPlugin {
     Write-Host "##[section]Install sfdx-git-delta plugin"
     Invoke-SfPluginInstallNonInteractive -PluginSpec 'sfdx-git-delta@stable'
-    & sf plugins
-    Write-StepBanner 'The sfdx-git-delta plugin installed successfully.'
+    $pluginVersion = Get-SfPluginVersion -Names @('sfdx-git-delta')
+    Write-StepBanner "sfdx-git-delta $pluginVersion installed."
 }
 
 function Install-CodeAnalyzerPlugin {
     Write-Host "##[section]Install code-analyzer plugin"
     Invoke-SfPluginInstallNonInteractive -PluginSpec 'code-analyzer'
-    & sf plugins
-    Write-StepBanner 'The Code Analyzer plugin installed successfully.'
+    $pluginVersion = Get-SfPluginVersion -Names @('code-analyzer', '@salesforce/plugin-code-analyzer')
+    Write-StepBanner "Code Analyzer $pluginVersion installed."
 }
 
 function Resolve-JwtInstanceUrl {
@@ -249,7 +267,7 @@ function Connect-SfOrg {
             throw "Unsupported authMethod '$AuthMethod'. Use jwt or authUrl."
         }
     }
-    Write-StepBanner 'The pipeline authenticated to the Salesforce org.'
+    Write-StepBanner 'Org authenticated.'
 }
 
 function Resolve-IgnoreFileArg {
@@ -291,7 +309,7 @@ function Invoke-SgdDelta {
     if (-not (Test-Path (Join-Path $SourcesRoot 'package/package.xml'))) {
         throw "package/package.xml not found after delta. Check git history and paths."
     }
-    Write-StepBanner 'The metadata delta package was generated from the git range.'
+    Write-StepBanner 'Delta package generated.'
 }
 
 function Copy-DeltaArtifacts {
@@ -476,11 +494,11 @@ function Invoke-SfOrgDeploy {
     }
     $sentence = switch ($outcome.Status) {
         'Succeeded' {
-            if ($coverageOk) { "$ActionName succeeded in the target org." }
-            else { "$ActionName failed because one or more Apex classes are below $MinimumCoverage% code coverage." }
+            if ($coverageOk) { "$ActionName succeeded." }
+            else { "$ActionName failed. Coverage below $MinimumCoverage%." }
         }
-        'Canceled' { "$ActionName was canceled in the target org." }
-        default { "$ActionName failed in the target org." }
+        'Canceled' { "$ActionName canceled." }
+        default { "$ActionName failed." }
     }
     Write-StepBanner $sentence
     if ($outcome.Status -ne 'Succeeded' -or -not $coverageOk) {
@@ -570,7 +588,7 @@ function Invoke-CodeAnalyzerOnDelta {
     }
 
     Invoke-Checked -Exe 'sf' -Arguments @($args.ToArray()) -DisplayName 'sf code-analyzer run (delta workspace)'
-    Write-StepBanner 'Code Analyzer finished scanning the delta metadata.'
+    Write-StepBanner 'Code Analyzer finished.'
 }
 
 function ConvertTo-SeverityNumber {
@@ -611,7 +629,7 @@ function Test-CodeAnalyzerSeverityGate {
     if ($failed.Count -gt 0) {
         $msg = "Code Analyzer: $($failed.Count) finding(s) exceed max allowed severity ($MaxAllowedSeverity)."
         Write-Host "##vso[task.logissue type=error]$msg"
-        Write-StepBanner 'Code Analyzer failed because findings exceed the allowed severity.'
+        Write-StepBanner 'Code Analyzer failed.'
         throw $msg
     }
 }
@@ -788,14 +806,15 @@ if (-not (Test-GitRef $fromRef)) {
 if (-not (Test-GitRef $toRef)) {
     throw "Git could not resolve '$toRef'."
 }
-Write-StepBanner 'Git history is available for the delta comparison.'
+Write-StepBanner 'Git history ready.'
 
 if (-not $skipCli) {
     Install-SfCli -Version $sfVer
 }
 else {
     if (-not (Get-Command sf -ErrorAction SilentlyContinue)) { throw 'sf CLI not found; uncheck skip install or pre-install CLI.' }
-    Write-StepBanner 'Salesforce CLI is already present on the agent.'
+    $cliVersion = Get-SalesforceCliVersion
+    Write-StepBanner "Salesforce CLI $cliVersion already installed."
 }
 
 Install-SfdxGitDeltaPlugin
@@ -839,7 +858,7 @@ finally {
     if ($pubCa) {
         try {
             if (Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'reports') -ArtifactName $caArtName -ContainerFolder 'Code-Analyzer') {
-                Write-StepBanner 'The Code Analyzer report was published as a pipeline artifact.'
+                Write-StepBanner 'Code Analyzer artifact published.'
             }
         }
         catch {
@@ -849,7 +868,7 @@ finally {
     if ($pubDelta) {
         try {
             if (Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'artifacts') -ArtifactName $deltaArtName -ContainerFolder 'Delta-Package') {
-                Write-StepBanner 'The delta package was published as a pipeline artifact.'
+                Write-StepBanner 'Delta artifact published.'
             }
         }
         catch {
