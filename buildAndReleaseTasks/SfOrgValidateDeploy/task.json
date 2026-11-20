@@ -4,7 +4,7 @@
   "name": "SfOrgValidateDeploy",
   "friendlyName": "Salesforce Org Validate & Deploy (Delta)",
   "description": "Generates delta with sfdx-git-delta (HEAD vs HEAD~1), optional Code Analyzer on delta only (default rules or custom PMD ruleset), JWT or SFDX Auth URL org login, validate or deploy, and pipeline artifacts.",
-  "helpMarkDown": "[sfdx-git-delta](https://github.com/scolladon/sfdx-git-delta) | Auth: JWT (`sf org login jwt`) or Auth URL (`sf org login sfdx-url`). Set checkout `fetchDepth: 0` so HEAD~1 exists.",
+  "helpMarkDown": "[Salesforce Delta Pipeline](https://github.com/WryCathedral/SF_Delta_Deployment). Select the JWT or Auth URL secure file on this task. A shallow checkout is fetched automatically so HEAD~1 exists.",
   "category": "Deploy",
   "author": "Your Team",
   "visibility": [
@@ -15,7 +15,7 @@
   "version": {
     "Major": 1,
     "Minor": 0,
-    "Patch": 1
+    "Patch": 2
   },
   "minimumAgentVersion": "4.248.0",
   "instanceNameFormat": "Salesforce Org Validate & Deploy (Delta)",
@@ -129,14 +129,23 @@
       "helpMarkDown": "Optional. If empty, derived from **Type of destination org** (`sandbox` → test.salesforce.com, `production` → login.salesforce.com). Use a custom My Domain URL when needed."
     },
     {
+      "name": "jwtKeySecureFile",
+      "type": "secureFile",
+      "label": "JWT private key secure file",
+      "required": false,
+      "groupName": "auth",
+      "visibleRule": "authMethod = jwt",
+      "helpMarkDown": "Select the private key from Pipelines → Library → Secure files. The agent downloads it for this task. A separate Download secure file step is not required."
+    },
+    {
       "name": "jwt_key_file",
       "type": "string",
       "label": "JWT private key file path",
-      "defaultValue": "$(jwt_key_file)",
-      "required": true,
+      "defaultValue": "",
+      "required": false,
       "groupName": "auth",
       "visibleRule": "authMethod = jwt",
-      "helpMarkDown": "Full path to the JWT private key on the agent (for example after DownloadSecureFile: `$(jwtkey.secureFilePath)`)."
+      "helpMarkDown": "Optional path if you already downloaded the key in an earlier step. Leave blank when JWT private key secure file is selected. JWT path override wins, then the secure file, then this path."
     },
     {
       "name": "jwt_token_path",
@@ -146,6 +155,15 @@
       "groupName": "auth",
       "visibleRule": "authMethod = jwt",
       "helpMarkDown": "If set, this path is used instead of JWT private key file path."
+    },
+    {
+      "name": "sfdxAuthUrlSecureFile",
+      "type": "secureFile",
+      "label": "SFDX Auth URL secure file",
+      "required": false,
+      "groupName": "auth",
+      "visibleRule": "authMethod = authUrl",
+      "helpMarkDown": "Secure file that contains one `force://...` line. The agent downloads it for this task."
     },
     {
       "name": "sfdx_auth_url_file",
@@ -221,6 +239,7 @@
       "groupName": "tests",
       "options": {
         "NoTestRun": "NoTestRun — do not run tests",
+        "RunRelevantTests": "RunRelevantTests — tests Salesforce selects for the changed Apex",
         "RunLocalTests": "RunLocalTests — all tests in the org except managed packages",
         "RunAllTestsInOrg": "RunAllTestsInOrg — all tests in the org",
         "RunSpecifiedTests": "RunSpecifiedTests — only the classes listed below"
@@ -245,6 +264,7 @@
       "groupName": "tests",
       "options": {
         "NoTestRun": "NoTestRun — do not run tests",
+        "RunRelevantTests": "RunRelevantTests — tests Salesforce selects for the changed Apex",
         "RunLocalTests": "RunLocalTests — all tests in the org except managed packages",
         "RunAllTestsInOrg": "RunAllTestsInOrg — all tests in the org",
         "RunSpecifiedTests": "RunSpecifiedTests — only the classes listed below"

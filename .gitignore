@@ -1,6 +1,5 @@
+vsix/
 *.vsix
-!gpattasw.sf-delta-pipeline-extension-*.vsix
-!GouravPragvamsaPwC.sf-delta-pipeline-extension-*.vsix
 *.zip
 node_modules/
 .DS_Store

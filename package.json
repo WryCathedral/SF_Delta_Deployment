@@ -1,10 +1,10 @@
 {
   "name": "sf-delta-pipeline-extension",
   "private": true,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Azure DevOps extension: Salesforce org validate & deploy (delta)",
   "scripts": {
-    "package": "tfx extension create --manifest-globs vss-extension.json"
+    "package": "tfx extension create --manifest-globs vss-extension.json --output-path vsix"
   },
   "devDependencies": {
     "tfx-cli": "^0.23.1"

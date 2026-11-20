@@ -46,8 +46,7 @@ Shown when `authMethod` is `authUrl`. Provide one of these. The task fails when 
 2. Create a variable group, for example `QA-Org`, with `alias`, `client_id`, and `username`. Mark the secret values as secret.
 3. For JWT, upload the private key under **Pipelines → Library → Secure files**.
 4. Create a YAML pipeline on the Salesforce repo. Set `trigger` and `pr` to the same integration branch you pass as `targetBranch`.
-5. Check out the repo with `fetchDepth: 0` so the task can resolve `HEAD~1`.
-6. Download the secure file, then run `SfOrgValidateDeploy@1`.
+5. Run `SfOrgValidateDeploy@1` and select the secure file on the task. The task downloads that file and fetches git history when the checkout is shallow.
 
 With `operationMode: auto`, a pull request into that branch validates, and the build on that branch after merge deploys.
 
@@ -70,13 +69,6 @@ pool:
 
 steps:
   - checkout: self
-    fetchDepth: 0
-
-  - task: DownloadSecureFile@1
-    name: jwtkey
-    displayName: Download JWT private key
-    inputs:
-      secureFile: your-jwt-private-key.pem
 
   - task: SfOrgValidateDeploy@1
     displayName: Salesforce Org Validate & Deploy (Delta)
@@ -87,7 +79,7 @@ steps:
       orgType: sandbox
       client_id: $(client_id)
       username: $(username)
-      jwt_key_file: $(jwtkey.secureFilePath)
+      jwtKeySecureFile: your-jwt-private-key.pem
       targetBranch: main
       validateTestLevel: NoTestRun
       deployTestLevel: NoTestRun
@@ -95,19 +87,4 @@ steps:
 
 Replace `main` with your integration branch in the trigger, the PR filter, and `targetBranch`. Use `orgType: production` for a production org.
 
-For an SFDX Auth URL instead of JWT, upload a secure file that contains one `force://...` line, download it, and set:
-
-```yaml
-  - task: DownloadSecureFile@1
-    name: authurl
-    inputs:
-      secureFile: sfdx-auth-url.txt
-
-  - task: SfOrgValidateDeploy@1
-    inputs:
-      operationMode: auto
-      alias: $(alias)
-      authMethod: authUrl
-      sfdx_auth_url_file: $(authurl.secureFilePath)
-      targetBranch: main
-```
+For an SFDX Auth URL instead of JWT, upload a secure file that contains one `force://...` line and set `authMethod: authUrl` and `sfdxAuthUrlSecureFile` to that file name.

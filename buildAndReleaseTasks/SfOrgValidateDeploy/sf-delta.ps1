@@ -31,6 +31,20 @@ function Test-BranchNameEquals {
     return [string]::Equals($A.Trim(), $B.Trim(), [StringComparison]::OrdinalIgnoreCase)
 }
 
+function Write-StepBanner {
+    param([string]$Message)
+    $width = [Math]::Max(48, $Message.Length)
+    $pad = $width - $Message.Length
+    $left = [int][Math]::Floor($pad / 2)
+    $right = $pad - $left
+    $bar = '*' * $width
+    Write-Host ''
+    Write-Host $bar
+    Write-Host (('*' * $left) + $Message + ('*' * $right))
+    Write-Host $bar
+    Write-Host ''
+}
+
 function Invoke-Checked {
     param(
         [string]$Exe,
@@ -56,6 +70,7 @@ function Install-SfCli {
     Write-Host "##[section]Install Salesforce CLI $spec"
     Invoke-Checked -Exe 'npm' -Arguments @('install', '--global', $spec) -DisplayName "npm install -g $spec"
     Invoke-Checked -Exe 'sf' -Arguments @('--version') -DisplayName 'sf --version'
+    Write-StepBanner 'cli installation completed'
 }
 
 function Test-IsWindowsOs {
@@ -121,12 +136,14 @@ function Install-SfdxGitDeltaPlugin {
     Write-Host "##[section]Install sfdx-git-delta plugin"
     Invoke-SfPluginInstallNonInteractive -PluginSpec 'sfdx-git-delta@stable'
     & sf plugins
+    Write-StepBanner 'sfdx-git-delta plugin installation completed'
 }
 
 function Install-CodeAnalyzerPlugin {
     Write-Host "##[section]Install code-analyzer plugin"
     Invoke-SfPluginInstallNonInteractive -PluginSpec 'code-analyzer'
     & sf plugins
+    Write-StepBanner 'code analyzer plugin installation completed'
 }
 
 function Resolve-JwtInstanceUrl {
@@ -232,6 +249,7 @@ function Connect-SfOrg {
             throw "Unsupported authMethod '$AuthMethod'. Use jwt or authUrl."
         }
     }
+    Write-StepBanner 'org authorization completed'
 }
 
 function Resolve-IgnoreFileArg {
@@ -271,8 +289,9 @@ function Invoke-SgdDelta {
     }
     Invoke-Checked -Exe 'sf' -Arguments $args -DisplayName 'sf sgd source delta'
     if (-not (Test-Path (Join-Path $SourcesRoot 'package/package.xml'))) {
-        throw "package/package.xml not found after delta. Check git history (use checkout fetchDepth: 0) and paths."
+        throw "package/package.xml not found after delta. Check git history and paths."
     }
+    Write-StepBanner 'delta generation completed'
 }
 
 function Copy-DeltaArtifacts {
@@ -320,68 +339,66 @@ function Add-DeployTestLevelArgs {
     }
 }
 
-function Invoke-SfDeployStart {
-    param(
-        [string[]]$Arguments,
-        [string]$FailureMessage
-    )
-    Write-Host "##[section]sf $($Arguments -join ' ')"
-    $lines = & sf @Arguments 2>&1
-    $code = $LASTEXITCODE
-    foreach ($line in @($lines)) { Write-Host $line }
-    if ($code -eq 0) { return }
-    $text = @($lines) | Out-String
-    # CLI older than 2.98 cannot format the Winter '26 "Finalizing" status and exits 1
-    # after the org has already accepted the deploy.
-    if ($text -match 'metadata\.transfer:Finalizing') {
-        Write-Host "##[warning]Salesforce CLI exited $code while formatting the Finalizing status. Checking the org deploy report before failing the step."
-        return
+function ConvertFrom-SfJsonText {
+    param([string]$Text)
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
+    $start = $Text.IndexOf('{')
+    $end = $Text.LastIndexOf('}')
+    if ($start -lt 0 -or $end -le $start) { return $null }
+    try {
+        return ($Text.Substring($start, $end - $start + 1) | ConvertFrom-Json)
     }
-    throw "$FailureMessage Command failed (${code}): sf $($Arguments -join ' ')"
+    catch {
+        return $null
+    }
 }
 
-function Test-DeployReportSucceeded {
-    param(
-        [string]$Alias,
-        [string]$WaitMinutes
-    )
-    if ([string]::IsNullOrWhiteSpace($WaitMinutes)) { $WaitMinutes = '120' }
-    $report = & sf project deploy report --target-org $Alias --use-most-recent --wait $WaitMinutes 2>&1 | Out-String
-    Write-Host $report
-    if ($report -match 'Succeeded') { return $true }
-    if ($report -match 'Failed') { return $false }
-    if ($report -match 'Canceled') { return $false }
-    return $false
+function Write-ComponentFailures {
+    param($Report)
+    $failures = $null
+    if ($Report -and $Report.result -and $Report.result.details -and $Report.result.details.componentFailures) {
+        $failures = @($Report.result.details.componentFailures)
+    }
+    if (-not $failures -or $failures.Count -eq 0) { return }
+    foreach ($f in $failures) {
+        $typeName = [string]$f.componentType
+        $fullName = [string]$f.fullName
+        $problem = [string]$f.problem
+        if ([string]::IsNullOrWhiteSpace($problem)) { $problem = [string]$f.error }
+        Write-Host "##[error]$typeName $fullName : $problem"
+    }
 }
 
-function Invoke-DeltaValidate {
+function Get-SfDeployStatus {
     param(
         [string]$Alias,
-        [string]$PackageXml,
-        [string]$DestructiveXml,
-        [string]$TestLevel,
-        [string]$SpecifiedTests,
         [string]$WaitMinutes,
-        [bool]$IgnoreWarnings
+        [string]$CommandOutput
     )
     if ([string]::IsNullOrWhiteSpace($WaitMinutes)) { $WaitMinutes = '120' }
-    $args = [System.Collections.Generic.List[string]]::new()
-    $args.AddRange([string[]]@('project', 'deploy', 'start', '--manifest', $PackageXml))
-    if ($DestructiveXml -and (Test-Path -LiteralPath $DestructiveXml)) {
-        $args.AddRange([string[]]@('--post-destructive-changes', $DestructiveXml))
+    Write-Host "##[section]sf project deploy report"
+    $reportText = & sf project deploy report --target-org $Alias --use-most-recent --wait $WaitMinutes --json 2>&1 | Out-String
+    Write-Host $reportText
+    $report = ConvertFrom-SfJsonText -Text $reportText
+    Write-ComponentFailures -Report $report
+    $status = $null
+    if ($report -and $report.result -and $report.result.status) {
+        $status = [string]$report.result.status
     }
-    $args.AddRange([string[]]@('--target-org', $Alias))
-    Add-DeployTestLevelArgs -ArgsList $args -TestLevel $TestLevel -SpecifiedTests $SpecifiedTests
-    if ($IgnoreWarnings) { $args.Add('--ignore-warnings') }
-    $args.AddRange([string[]]@('--dry-run', '--wait', $WaitMinutes, '--verbose'))
-    Invoke-SfDeployStart -Arguments @($args.ToArray()) -FailureMessage 'Delta validation (dry-run) failed.'
-    if (-not (Test-DeployReportSucceeded -Alias $Alias -WaitMinutes $WaitMinutes)) {
-        throw 'Delta validation (dry-run) did not succeed.'
+    if ([string]::IsNullOrWhiteSpace($status) -and $CommandOutput -match 'Status:\s*(Succeeded|Failed|Canceled|Cancelled)') {
+        $status = $Matches[1]
     }
+    if ($status -eq 'Cancelled') { $status = 'Canceled' }
+    if ([string]::IsNullOrWhiteSpace($status)) {
+        if ($CommandOutput -match 'metadata\.transfer:Finalizing') { return 'Unknown' }
+        return 'Failed'
+    }
+    return $status
 }
 
-function Invoke-DeltaDeploy {
+function Invoke-SfOrgDeploy {
     param(
+        [string]$ActionName,
         [string]$Alias,
         [string]$PackageXml,
         [string]$DestructiveXml,
@@ -389,7 +406,8 @@ function Invoke-DeltaDeploy {
         [string]$SpecifiedTests,
         [string]$WaitMinutes,
         [bool]$IgnoreWarnings,
-        [bool]$IgnoreConflicts
+        [bool]$IgnoreConflicts,
+        [bool]$DryRun
     )
     if ([string]::IsNullOrWhiteSpace($WaitMinutes)) { $WaitMinutes = '120' }
     $args = [System.Collections.Generic.List[string]]::new()
@@ -397,14 +415,34 @@ function Invoke-DeltaDeploy {
     if ($DestructiveXml -and (Test-Path -LiteralPath $DestructiveXml)) {
         $args.AddRange([string[]]@('--post-destructive-changes', $DestructiveXml))
     }
-    if ($IgnoreConflicts) { $args.Add('--ignore-conflicts') }
+    if ($IgnoreConflicts -and -not $DryRun) { $args.Add('--ignore-conflicts') }
     $args.AddRange([string[]]@('--target-org', $Alias))
     Add-DeployTestLevelArgs -ArgsList $args -TestLevel $TestLevel -SpecifiedTests $SpecifiedTests
     if ($IgnoreWarnings) { $args.Add('--ignore-warnings') }
+    if ($DryRun) { $args.Add('--dry-run') }
     $args.AddRange([string[]]@('--wait', $WaitMinutes, '--verbose'))
-    Invoke-SfDeployStart -Arguments @($args.ToArray()) -FailureMessage 'Delta deployment failed.'
-    if (-not (Test-DeployReportSucceeded -Alias $Alias -WaitMinutes $WaitMinutes)) {
-        throw 'Delta deployment did not succeed.'
+
+    Write-Host "##[section]sf $($args -join ' ')"
+    $lines = & sf @($args.ToArray()) 2>&1
+    $code = $LASTEXITCODE
+    foreach ($line in @($lines)) { Write-Host $line }
+    $text = @($lines) | Out-String
+    if ($code -ne 0 -and $text -match 'metadata\.transfer:Finalizing') {
+        Write-Host "##[warning]Salesforce CLI exited $code while formatting the Finalizing status. The org result is read from the deploy report."
+    }
+
+    $status = Get-SfDeployStatus -Alias $Alias -WaitMinutes $WaitMinutes -CommandOutput $text
+    if ($status -eq 'Unknown') {
+        $status = Get-SfDeployStatus -Alias $Alias -WaitMinutes $WaitMinutes -CommandOutput ''
+    }
+    $verb = switch ($status) {
+        'Succeeded' { 'succeeded' }
+        'Canceled' { 'canceled' }
+        default { 'failed' }
+    }
+    Write-StepBanner "$ActionName $verb"
+    if ($status -ne 'Succeeded') {
+        throw "$ActionName $verb"
     }
 }
 
@@ -490,6 +528,7 @@ function Invoke-CodeAnalyzerOnDelta {
     }
 
     Invoke-Checked -Exe 'sf' -Arguments @($args.ToArray()) -DisplayName 'sf code-analyzer run (delta workspace)'
+    Write-StepBanner 'code analyzer completed'
 }
 
 function ConvertTo-SeverityNumber {
@@ -530,6 +569,7 @@ function Test-CodeAnalyzerSeverityGate {
     if ($failed.Count -gt 0) {
         $msg = "Code Analyzer: $($failed.Count) finding(s) exceed max allowed severity ($MaxAllowedSeverity)."
         Write-Host "##vso[task.logissue type=error]$msg"
+        Write-StepBanner 'code analyzer failed'
         throw $msg
     }
 }
@@ -542,14 +582,14 @@ function Publish-PipelineArtifactFromFolder {
     )
     if (-not (Test-Path -LiteralPath $FolderPath)) {
         Write-Host "##[warning]Artifact folder missing: $FolderPath"
-        return
+        return $false
     }
     if ([string]::IsNullOrWhiteSpace($ContainerFolder)) { $ContainerFolder = 'Artifact' }
     $rootFull = (Resolve-Path -LiteralPath $FolderPath).Path.TrimEnd('\', '/')
     $files = @(Get-ChildItem -LiteralPath $rootFull -File -Recurse)
     if ($files.Count -eq 0) {
         Write-Host "##[warning]No files to publish in $FolderPath"
-        return
+        return $false
     }
     foreach ($file in $files) {
         $relative = $file.FullName.Substring($rootFull.Length).TrimStart('\', '/')
@@ -561,6 +601,7 @@ function Publish-PipelineArtifactFromFolder {
         Write-Host "Publishing $($file.Name) to $ArtifactName/$folder"
         Write-Host "##vso[artifact.upload containerfolder=$folder;artifactname=$ArtifactName;artifacttype=container;]$($file.FullName)"
     }
+    return $true
 }
 
 $root = $env:BUILD_SOURCESDIRECTORY
@@ -579,9 +620,21 @@ $clientId = Get-TaskInput -Name 'client_id'
 $username = Get-TaskInput -Name 'username'
 $instanceUrl = Get-TaskInput -Name 'instance_url'
 $jwtKeyFile = Get-TaskInput -Name 'jwt_key_file'
+$jwtSecureFile = Get-TaskInput -Name 'jwtKeySecureFile'
 $jwtTokenPath = Get-TaskInput -Name 'jwt_token_path'
-$jwtPath = if (-not [string]::IsNullOrWhiteSpace($jwtTokenPath)) { $jwtTokenPath } else { $jwtKeyFile }
+$jwtPath = if (-not [string]::IsNullOrWhiteSpace($jwtTokenPath)) { $jwtTokenPath }
+    elseif (-not [string]::IsNullOrWhiteSpace($jwtSecureFile)) { $jwtSecureFile }
+    else { $jwtKeyFile }
+if (-not [string]::IsNullOrWhiteSpace($jwtPath)) {
+    $jwtPath = $jwtPath.Trim().Trim('"')
+    if (-not (Test-Path -LiteralPath $jwtPath) -and $jwtPath.EndsWith(')') -and (Test-Path -LiteralPath $jwtPath.TrimEnd(')'))) {
+        Write-Host "##[warning]JWT path had a trailing ')'. Using $($jwtPath.TrimEnd(')'))."
+        $jwtPath = $jwtPath.TrimEnd(')')
+    }
+}
 $sfdxAuthUrlFile = Get-TaskInput -Name 'sfdx_auth_url_file'
+$sfdxAuthUrlSecureFile = Get-TaskInput -Name 'sfdxAuthUrlSecureFile'
+if (-not [string]::IsNullOrWhiteSpace($sfdxAuthUrlSecureFile)) { $sfdxAuthUrlFile = $sfdxAuthUrlSecureFile.Trim().Trim('"') }
 $sfdxAuthUrl = Get-TaskInput -Name 'sfdx_auth_url'
 
 $sfVer = Get-TaskInput -Name 'sfCliVersion'
@@ -663,21 +716,34 @@ elseif ($resolved -ne 'validate' -and $resolved -ne 'deploy') {
 
 Write-Host "##[section]Salesforce org validate/deploy (delta) | mode=$resolved | sources=$root"
 
-# Verify git range exists (avoid shallow clone with depth 1 only)
-git rev-parse $fromRef 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) {
-    throw "Git could not resolve '$fromRef'. Add a checkout step with fetchDepth: 0 (full history) so HEAD~1 exists."
+function Test-GitRef {
+    param([string]$Ref)
+    git rev-parse $Ref 2>&1 | Out-Null
+    return $LASTEXITCODE -eq 0
 }
-git rev-parse $toRef 2>&1 | Out-Null
-if ($LASTEXITCODE -ne 0) {
+
+$shallow = (git rev-parse --is-shallow-repository 2>$null | Out-String).Trim()
+if ($shallow -eq 'true' -or -not (Test-GitRef $fromRef) -or -not (Test-GitRef $toRef)) {
+    Write-Host "##[section]Fetching full git history so $fromRef exists"
+    git fetch --unshallow 2>&1 | ForEach-Object { Write-Host $_ }
+    if (-not (Test-GitRef $fromRef)) {
+        git fetch origin $targetBranch --depth=50 2>&1 | ForEach-Object { Write-Host $_ }
+    }
+}
+if (-not (Test-GitRef $fromRef)) {
+    throw "Git could not resolve '$fromRef' after fetching history."
+}
+if (-not (Test-GitRef $toRef)) {
     throw "Git could not resolve '$toRef'."
 }
+Write-StepBanner 'git history ready'
 
 if (-not $skipCli) {
     Install-SfCli -Version $sfVer
 }
 else {
     if (-not (Get-Command sf -ErrorAction SilentlyContinue)) { throw 'sf CLI not found; uncheck skip install or pre-install CLI.' }
+    Write-StepBanner 'cli already installed'
 }
 
 Install-SfdxGitDeltaPlugin
@@ -689,6 +755,7 @@ Connect-SfOrg -AuthMethod $authMethod -Alias $alias -Username $username -ClientI
 
 $ignoreResolved = Resolve-IgnoreFileArg -SourcesRoot $root -IgnoreFileInput $ignoreInput
 
+$stepError = $null
 try {
     Invoke-SgdDelta -SourcesRoot $root -FromRef $fromRef -ToRef $toRef -IgnoreFile $ignoreResolved
     Copy-DeltaArtifacts -SourcesRoot $root
@@ -702,25 +769,43 @@ try {
         if ($enforceGate -and (Test-Path -LiteralPath $reportCsv)) {
             Test-CodeAnalyzerSeverityGate -CsvPath $reportCsv -MaxAllowedSeverity $maxAllowed
         }
-        if ($pubCa) {
-            Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'reports') -ArtifactName $caArtName -ContainerFolder 'Code-Analyzer'
-        }
     }
 
     if ($resolved -eq 'validate') {
         Write-Host "Validate test level: $validateTestLevel | wait=$deployWaitTime | ignoreWarnings=$ignoreWarnings"
-        Invoke-DeltaValidate -Alias $alias -PackageXml $pkgXml -DestructiveXml $destXml -TestLevel $validateTestLevel -SpecifiedTests $validateSpecifiedTests -WaitMinutes $deployWaitTime -IgnoreWarnings $ignoreWarnings
+        Invoke-SfOrgDeploy -ActionName 'Validation' -Alias $alias -PackageXml $pkgXml -DestructiveXml $destXml -TestLevel $validateTestLevel -SpecifiedTests $validateSpecifiedTests -WaitMinutes $deployWaitTime -IgnoreWarnings $ignoreWarnings -IgnoreConflicts $false -DryRun $true
     }
     elseif ($resolved -eq 'deploy') {
         Write-Host "Deploy test level: $deployTestLevel | wait=$deployWaitTime | ignoreWarnings=$ignoreWarnings | ignoreConflicts=$ignoreConflicts"
-        Invoke-DeltaDeploy -Alias $alias -PackageXml $pkgXml -DestructiveXml $destXml -TestLevel $deployTestLevel -SpecifiedTests $deploySpecifiedTests -WaitMinutes $deployWaitTime -IgnoreWarnings $ignoreWarnings -IgnoreConflicts $ignoreConflicts
-    }
-
-    if ($pubDelta) {
-        Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'artifacts') -ArtifactName $deltaArtName -ContainerFolder 'Delta-Package'
+        Invoke-SfOrgDeploy -ActionName 'Deployment' -Alias $alias -PackageXml $pkgXml -DestructiveXml $destXml -TestLevel $deployTestLevel -SpecifiedTests $deploySpecifiedTests -WaitMinutes $deployWaitTime -IgnoreWarnings $ignoreWarnings -IgnoreConflicts $ignoreConflicts -DryRun $false
     }
 }
 catch {
-    Write-Host "##vso[task.logissue type=error]$_"
-    throw
+    $stepError = $_
+}
+finally {
+    if ($pubCa) {
+        try {
+            if (Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'reports') -ArtifactName $caArtName -ContainerFolder 'Code-Analyzer') {
+                Write-StepBanner 'code analyzer artifact published'
+            }
+        }
+        catch {
+            Write-Host "##[warning]Could not publish Code Analyzer artifact: $_"
+        }
+    }
+    if ($pubDelta) {
+        try {
+            if (Publish-PipelineArtifactFromFolder -FolderPath (Join-Path $root 'artifacts') -ArtifactName $deltaArtName -ContainerFolder 'Delta-Package') {
+                Write-StepBanner 'delta artifact published'
+            }
+        }
+        catch {
+            Write-Host "##[warning]Could not publish delta artifact: $_"
+        }
+    }
+}
+if ($null -ne $stepError) {
+    Write-Host "##vso[task.logissue type=error]$stepError"
+    throw $stepError
 }
