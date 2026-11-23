@@ -15,7 +15,7 @@
   "version": {
     "Major": 1,
     "Minor": 0,
-    "Patch": 3
+    "Patch": 6
   },
   "minimumAgentVersion": "4.248.0",
   "instanceNameFormat": "Salesforce Org Validate & Deploy (Delta)",
@@ -135,7 +135,7 @@
       "required": false,
       "groupName": "auth",
       "visibleRule": "authMethod = jwt",
-      "helpMarkDown": "Select the private key from Pipelines → Library → Secure files. The agent downloads it for this task. A separate Download secure file step is not required."
+      "helpMarkDown": "Select the private key from Pipelines → Library → Secure files. Azure DevOps passes the file id, and this task downloads the key. A separate Download secure file step is not required. Authorize the pipeline to use the file."
     },
     {
       "name": "jwt_key_file",
@@ -145,7 +145,7 @@
       "required": false,
       "groupName": "auth",
       "visibleRule": "authMethod = jwt",
-      "helpMarkDown": "Optional path if you already downloaded the key in an earlier step. Leave blank when JWT private key secure file is selected. JWT path override wins, then the secure file, then this path."
+      "helpMarkDown": "Optional path if you already downloaded the key in an earlier step. Leave blank when JWT private key secure file is selected. A path override is used only when that file exists; otherwise the secure file is downloaded."
     },
     {
       "name": "jwt_token_path",
@@ -163,7 +163,7 @@
       "required": false,
       "groupName": "auth",
       "visibleRule": "authMethod = authUrl",
-      "helpMarkDown": "Secure file that contains one `force://...` line. The agent downloads it for this task."
+      "helpMarkDown": "Secure file that contains one `force://...` line. Azure DevOps passes the file id, and this task downloads it. Authorize the pipeline to use the file."
     },
     {
       "name": "sfdx_auth_url_file",

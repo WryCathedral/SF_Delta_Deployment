@@ -2,7 +2,7 @@
   "manifestVersion": 1,
   "id": "sf-delta-pipeline-extension",
   "publisher": "GouravPragvamsaPwC",
-  "version": "1.0.3",
+  "version": "1.0.6",
   "name": "Salesforce Delta Pipeline",
   "description": "Validate and deploy Salesforce metadata deltas (sfdx-git-delta) with optional Code Analyzer (default or custom PMD), JWT or SFDX Auth URL login, and artifact publishing.",
   "categories": ["Azure Pipelines"],

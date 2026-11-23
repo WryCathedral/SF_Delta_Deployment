@@ -13,6 +13,164 @@ function Get-TaskInput {
     return [Environment]::GetEnvironmentVariable($envKey)
 }
 
+function Repair-OptionalPath {
+    param([string]$PathValue)
+    if ([string]::IsNullOrWhiteSpace($PathValue)) { return $null }
+    $candidate = $PathValue.Trim().Trim('"')
+    $withoutParen = $candidate.TrimEnd([char]')')
+    if (-not (Test-Path -LiteralPath $candidate) -and $candidate.EndsWith(')') -and (Test-Path -LiteralPath $withoutParen)) {
+        Write-Host "##[warning]Path had a trailing parenthesis. Using $withoutParen."
+        return $withoutParen
+    }
+    return $candidate
+}
+
+function Get-SecureFileAccessToken {
+    $token = [Environment]::GetEnvironmentVariable('ENDPOINT_AUTH_PARAMETER_SYSTEMVSSCONNECTION_ACCESSTOKEN')
+    if ([string]::IsNullOrWhiteSpace($token)) {
+        $token = [Environment]::GetEnvironmentVariable('SYSTEM_ACCESSTOKEN')
+    }
+    if ([string]::IsNullOrWhiteSpace($token)) { return $null }
+    return $token.Trim()
+}
+
+function Get-SafeServiceMessage {
+    param([byte[]]$Bytes)
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0 -or $Bytes.Length -gt 8000) { return $null }
+    $text = [Text.Encoding]::UTF8.GetString($Bytes).Trim()
+    if (-not $text.StartsWith('{')) { return $null }
+    try { $obj = $text | ConvertFrom-Json } catch { return $null }
+    $message = [string]$obj.message
+    if ([string]::IsNullOrWhiteSpace($message)) { return $null }
+    if ($message -match 'BEGIN |PRIVATE KEY|ssh-rsa') { return $null }
+    if ($message.Length -gt 240) { $message = $message.Substring(0, 240) }
+    return $message
+}
+
+function Test-DownloadedFileBytes {
+    param([byte[]]$Bytes)
+    if ($null -eq $Bytes -or $Bytes.Length -eq 0) { return $false }
+    $sampleLength = [Math]::Min(120, $Bytes.Length)
+    $sample = [Text.Encoding]::UTF8.GetString($Bytes, 0, $sampleLength).TrimStart([char]0xFEFF, ' ', "`t", "`r", "`n")
+    if ($sample.StartsWith('{') -or $sample.StartsWith('<') -or $sample.StartsWith('$id')) { return $false }
+    return $true
+}
+
+function Save-AgentSecureFile {
+    param(
+        [Parameter(Mandatory = $true)][string]$FileId,
+        [string]$Label
+    )
+    $id = $FileId.Trim()
+    $ticket = [Environment]::GetEnvironmentVariable("SECUREFILE_TICKET_$id")
+    $secureName = [Environment]::GetEnvironmentVariable("SECUREFILE_NAME_$id")
+    if ([string]::IsNullOrWhiteSpace($ticket)) { return $null }
+
+    $safeName = if ([string]::IsNullOrWhiteSpace($secureName)) { $id } else { [IO.Path]::GetFileName($secureName) }
+    $collection = $env:SYSTEM_TEAMFOUNDATIONCOLLECTIONURI
+    if ([string]::IsNullOrWhiteSpace($collection)) { $collection = $env:SYSTEM_COLLECTIONURI }
+    $project = $env:SYSTEM_TEAMPROJECT
+    if ([string]::IsNullOrWhiteSpace($collection) -or [string]::IsNullOrWhiteSpace($project)) {
+        throw "Cannot download $Label. The agent did not provide the collection URI or project name."
+    }
+
+    $tempRoot = $env:AGENT_TEMPDIRECTORY
+    if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = [IO.Path]::GetTempPath() }
+    $destDir = Join-Path $tempRoot 'sf-delta-secure'
+    if (-not (Test-Path -LiteralPath $destDir)) {
+        New-Item -ItemType Directory -Force -Path $destDir | Out-Null
+    }
+    $dest = Join-Path $destDir $safeName
+    $accessToken = Get-SecureFileAccessToken
+    if ([string]::IsNullOrWhiteSpace($accessToken)) {
+        throw "Could not download $Label '$safeName'. The agent did not provide the pipeline access token."
+    }
+    $basicToken = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes(':' + $accessToken))
+    $ticketEscaped = [Uri]::EscapeDataString($ticket)
+    $projectEscaped = [Uri]::EscapeDataString($project)
+    $collectionRoot = $collection.TrimEnd('/')
+    Write-Host "Downloading $Label '$safeName'."
+
+    $downloaded = $false
+    $lastStatus = 0
+    $lastMessage = $null
+    $client = $null
+    try {
+        $client = [System.Net.Http.HttpClient]::new()
+        $client.Timeout = [TimeSpan]::FromMinutes(2)
+        $attempts = @(
+            @{ Authorization = ('Basic ' + $basicToken); Download = 'false' },
+            @{ Authorization = ('Bearer ' + $accessToken); Download = 'false' },
+            @{ Authorization = ('Bearer ' + $accessToken); Download = 'true' }
+        )
+        for ($attempt = 1; $attempt -le $attempts.Count; $attempt++) {
+            $style = $attempts[$attempt - 1]
+            $request = $null
+            $response = $null
+            try {
+                if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force }
+                $uri = '{0}/{1}/_apis/distributedtask/securefiles/{2}?ticket={3}&download={4}&api-version=5.0-preview.1' -f $collectionRoot, $projectEscaped, $id, $ticketEscaped, $style.Download
+                $request = [System.Net.Http.HttpRequestMessage]::new([System.Net.Http.HttpMethod]::Get, $uri)
+                [void]$request.Headers.TryAddWithoutValidation('Accept', 'application/octet-stream')
+                [void]$request.Headers.TryAddWithoutValidation('Authorization', $style.Authorization)
+                [void]$request.Headers.TryAddWithoutValidation('X-TFS-FedAuthRedirect', 'Suppress')
+                $response = $client.SendAsync($request).GetAwaiter().GetResult()
+                $lastStatus = [int]$response.StatusCode
+                $bytes = $response.Content.ReadAsByteArrayAsync().GetAwaiter().GetResult()
+                $lastMessage = Get-SafeServiceMessage -Bytes $bytes
+                if ($lastStatus -ge 200 -and $lastStatus -lt 300 -and (Test-DownloadedFileBytes -Bytes $bytes)) {
+                    [System.IO.File]::WriteAllBytes($dest, $bytes)
+                    $downloaded = $true
+                    break
+                }
+                $detail = "HTTP $lastStatus"
+                if (-not [string]::IsNullOrWhiteSpace($lastMessage)) { $detail = "$detail. $lastMessage" }
+                Write-Host "##[warning]Download attempt $attempt for '$safeName' did not return the file ($detail)."
+            }
+            catch {
+                Write-Host "##[warning]Download attempt $attempt for '$safeName' failed."
+                if (Test-Path -LiteralPath $dest) { Remove-Item -LiteralPath $dest -Force -ErrorAction SilentlyContinue }
+            }
+            finally {
+                if ($response) { $response.Dispose() }
+                if ($request) { $request.Dispose() }
+            }
+            if ($attempt -lt $attempts.Count) { Start-Sleep -Seconds (2 * $attempt) }
+        }
+    }
+    finally {
+        if ($client) { $client.Dispose() }
+    }
+
+    if (-not $downloaded) {
+        $detail = "HTTP $lastStatus"
+        if (-not [string]::IsNullOrWhiteSpace($lastMessage)) { $detail = "$detail. $lastMessage" }
+        throw "Could not download $Label '$safeName' ($detail)."
+    }
+    if (-not (Test-IsWindowsOs)) {
+        & chmod 600 -- $dest
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "##[warning]Could not restrict permissions on '$safeName'."
+        }
+    }
+    return $dest
+}
+
+function Resolve-SecureOrPathInput {
+    param(
+        [string]$SecureFileValue,
+        [string]$Label
+    )
+    if ([string]::IsNullOrWhiteSpace($SecureFileValue)) { return $null }
+    $secureValue = $SecureFileValue.Trim().Trim('"')
+    if (Test-Path -LiteralPath $secureValue) {
+        return (Resolve-Path -LiteralPath $secureValue).Path
+    }
+    $downloaded = Save-AgentSecureFile -FileId $secureValue -Label $Label
+    if (-not [string]::IsNullOrWhiteSpace($downloaded)) { return $downloaded }
+    throw "$Label secure file was selected, but the agent did not provide a download ticket. Re-select the file on the task and authorize the pipeline to use it."
+}
+
 function Test-InputBool {
     param([string]$Value)
     if ([string]::IsNullOrWhiteSpace($Value)) { return $false }
@@ -65,14 +223,37 @@ function Get-SalesforceCliVersion {
     return 'unknown'
 }
 
-function Get-SfPluginVersion {
-    param([string[]]$Names)
-    $text = (& sf plugins 2>&1 | Out-String)
-    Write-Host $text
+function Get-VersionFromPluginText {
+    param(
+        [string]$Text,
+        [string[]]$Names
+    )
+    if ([string]::IsNullOrWhiteSpace($Text)) { return $null }
     foreach ($name in $Names) {
-        $pattern = '(?im)^\s*' + [regex]::Escape($name) + '\s+v?(\d+\.\d+\.\d+)'
-        if ($text -match $pattern) { return $Matches[1] }
+        $pattern = [regex]::Escape($name) + '[^\r\n]{0,160}?v?(\d+\.\d+\.\d+)'
+        if ($Text -match $pattern) { return $Matches[1] }
     }
+    if ($Text -match 'installed v?(\d+\.\d+\.\d+)') { return $Matches[1] }
+    return $null
+}
+
+function Get-SfPluginVersion {
+    param(
+        [string[]]$Names,
+        [string]$InstallOutput
+    )
+    $fromInstall = Get-VersionFromPluginText -Text $InstallOutput -Names $Names
+    if (-not [string]::IsNullOrWhiteSpace($fromInstall)) { return $fromInstall }
+
+    $jsonLog = Join-Path ([IO.Path]::GetTempPath()) ('sf-plugins-' + [guid]::NewGuid().ToString() + '.log')
+    & sf plugins --json > $jsonLog 2>&1
+    $jsonText = ''
+    if (Test-Path -LiteralPath $jsonLog) {
+        $jsonText = Get-Content -LiteralPath $jsonLog -Raw -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $jsonLog -Force -ErrorAction SilentlyContinue
+    }
+    $fromJson = Get-VersionFromPluginText -Text $jsonText -Names $Names
+    if (-not [string]::IsNullOrWhiteSpace($fromJson)) { return $fromJson }
     return 'unknown'
 }
 
@@ -147,20 +328,33 @@ function Invoke-SfPluginInstallNonInteractive {
     param([string]$PluginSpec)
     $allowName = Get-SfPluginAllowListName -PluginSpec $PluginSpec
     Add-UnsignedPluginAllowList -PluginName $allowName
-    Invoke-Checked -Exe 'sf' -Arguments @('plugins', 'install', $PluginSpec) -DisplayName "sf plugins install $PluginSpec"
+    Write-Host "##[section]sf plugins install $PluginSpec"
+    $log = Join-Path ([IO.Path]::GetTempPath()) ('sf-plugin-install-' + [guid]::NewGuid().ToString() + '.log')
+    & sf plugins install $PluginSpec > $log 2>&1
+    $exitCode = $LASTEXITCODE
+    $output = ''
+    if (Test-Path -LiteralPath $log) {
+        $output = Get-Content -LiteralPath $log -Raw -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace($output)) { Write-Host $output }
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
+    }
+    if ($exitCode -ne 0) {
+        throw "Command failed (${exitCode}): sf plugins install $PluginSpec"
+    }
+    return $output
 }
 
 function Install-SfdxGitDeltaPlugin {
     Write-Host "##[section]Install sfdx-git-delta plugin"
-    Invoke-SfPluginInstallNonInteractive -PluginSpec 'sfdx-git-delta@stable'
-    $pluginVersion = Get-SfPluginVersion -Names @('sfdx-git-delta')
+    $installOutput = Invoke-SfPluginInstallNonInteractive -PluginSpec 'sfdx-git-delta@stable'
+    $pluginVersion = Get-SfPluginVersion -Names @('sfdx-git-delta') -InstallOutput $installOutput
     Write-StepBanner "sfdx-git-delta $pluginVersion installed."
 }
 
 function Install-CodeAnalyzerPlugin {
     Write-Host "##[section]Install code-analyzer plugin"
-    Invoke-SfPluginInstallNonInteractive -PluginSpec 'code-analyzer'
-    $pluginVersion = Get-SfPluginVersion -Names @('code-analyzer', '@salesforce/plugin-code-analyzer')
+    $installOutput = Invoke-SfPluginInstallNonInteractive -PluginSpec 'code-analyzer'
+    $pluginVersion = Get-SfPluginVersion -Names @('code-analyzer', '@salesforce/plugin-code-analyzer') -InstallOutput $installOutput
     Write-StepBanner "Code Analyzer $pluginVersion installed."
 }
 
@@ -180,6 +374,91 @@ function Resolve-JwtInstanceUrl {
     }
 }
 
+function Convert-JwtPrivateKeyFile {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $bytes = [System.IO.File]::ReadAllBytes($Path)
+    $text = $null
+    if ($bytes.Length -ge 2 -and $bytes[0] -eq 255 -and $bytes[1] -eq 254) {
+        $text = [Text.Encoding]::Unicode.GetString($bytes, 2, $bytes.Length - 2)
+    }
+    elseif ($bytes.Length -ge 2 -and $bytes[0] -eq 254 -and $bytes[1] -eq 255) {
+        $text = [Text.Encoding]::BigEndianUnicode.GetString($bytes, 2, $bytes.Length - 2)
+    }
+    else {
+        $offset = 0
+        if ($bytes.Length -ge 3 -and $bytes[0] -eq 239 -and $bytes[1] -eq 187 -and $bytes[2] -eq 191) { $offset = 3 }
+        $text = [Text.Encoding]::UTF8.GetString($bytes, $offset, $bytes.Length - $offset)
+    }
+    $text = $text.Trim().Trim([char]0xFEFF)
+    if ($text.StartsWith('ssh-rsa ') -or $text.StartsWith('ssh-ed25519 ') -or $text.StartsWith('ecdsa-sha2-')) {
+        throw 'The JWT file is an OpenSSH public key. Upload the private key, not the .pub file.'
+    }
+    if ($text.StartsWith('{') -or $text.StartsWith('<')) {
+        throw 'The JWT file is not a private key. The download returned a service message instead of the key file. Authorize the pipeline for that secure file and run again.'
+    }
+
+    $blocks = [regex]::Matches($text, '-----BEGIN [A-Z0-9 ]+-----.*?-----END [A-Z0-9 ]+-----', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    $chosen = $null
+    foreach ($block in $blocks) {
+        if ($block.Value -match 'PRIVATE KEY') { $chosen = $block.Value.Trim(); break }
+    }
+    if ([string]::IsNullOrWhiteSpace($chosen) -and $blocks.Count -gt 0) { $chosen = $blocks[0].Value.Trim() }
+    if ([string]::IsNullOrWhiteSpace($chosen)) {
+        throw "The JWT file is $($bytes.Length) bytes and does not contain a PEM private key. Upload an unencrypted RSA key that starts with BEGIN RSA PRIVATE KEY or BEGIN PRIVATE KEY."
+    }
+    $chosen = ($chosen -replace "`r`n", "`n" -replace "`r", "`n").Trim() + "`n"
+    $header = 'unrecognized'
+    if ($chosen -match '-----BEGIN ([A-Z0-9 ]+)-----') { $header = $Matches[1] }
+
+    $tempRoot = $env:AGENT_TEMPDIRECTORY
+    if ([string]::IsNullOrWhiteSpace($tempRoot)) { $tempRoot = [System.IO.Path]::GetTempPath() }
+    $destDir = Join-Path $tempRoot 'sf-delta-secure'
+    if (-not (Test-Path -LiteralPath $destDir)) { New-Item -ItemType Directory -Force -Path $destDir | Out-Null }
+    $dest = Join-Path $destDir 'jwt-private-key.pem'
+    $utf8 = New-Object System.Text.UTF8Encoding $false
+    [System.IO.File]::WriteAllText($dest, $chosen, $utf8)
+    if (-not (Test-IsWindowsOs)) { & chmod 600 -- $dest | Out-Null }
+
+    if ($header -eq 'OPENSSH PRIVATE KEY') {
+        Write-Host 'Converting OpenSSH private key to PEM.'
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & ssh-keygen -p -m PEM -f $dest -P '' -N '' > $null
+        $convertCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousPreference
+        if ($convertCode -ne 0) {
+            throw 'The secure file is an OpenSSH private key and could not be converted. Upload an unencrypted RSA key in PEM format.'
+        }
+        $converted = [System.IO.File]::ReadAllText($dest)
+        if ($converted -match '-----BEGIN ([A-Z0-9 ]+)-----') { $header = $Matches[1] }
+    }
+    if ($header -match 'ENCRYPTED') {
+        throw 'The private key is encrypted. Salesforce JWT needs an unencrypted PEM private key.'
+    }
+    if ($header -match 'CERTIFICATE|PUBLIC KEY') {
+        throw "The secure file is a $header, not a private key. Upload the RSA private key for the connected app."
+    }
+    if ($header -notmatch 'PRIVATE KEY') {
+        throw "The secure file format '$header' is not an RSA private key. Upload a PEM file that starts with BEGIN RSA PRIVATE KEY or BEGIN PRIVATE KEY."
+    }
+
+    $openssl = Get-Command openssl -ErrorAction SilentlyContinue
+    if ($openssl) {
+        $opensslLog = Join-Path $tempRoot ('openssl-jwt-' + [guid]::NewGuid().ToString() + '.log')
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        & openssl pkey -in $dest -noout 2> $opensslLog
+        $opensslOk = $LASTEXITCODE -eq 0
+        $ErrorActionPreference = $previousPreference
+        if (Test-Path -LiteralPath $opensslLog) { Remove-Item -LiteralPath $opensslLog -Force -ErrorAction SilentlyContinue }
+        if (-not $opensslOk) {
+            throw 'OpenSSL could not read the JWT private key. Upload an unencrypted RSA PEM private key.'
+        }
+    }
+    Write-Host "JWT private key format: $header."
+    return $dest
+}
+
 function Connect-SfOrgJwt {
     param(
         [string]$Username,
@@ -193,8 +472,12 @@ function Connect-SfOrgJwt {
     if ([string]::IsNullOrWhiteSpace($Username)) { throw 'username is required for JWT authentication.' }
     $resolvedUrl = Resolve-JwtInstanceUrl -InstanceUrl $InstanceUrl -OrgType $OrgType
     if ([string]::IsNullOrWhiteSpace($JwtKeyPath) -or -not (Test-Path -LiteralPath $JwtKeyPath)) {
+        if ($JwtKeyPath -match '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$') {
+            throw "JWT key file not found: $JwtKeyPath. That value is a secure file id. Select it in JWT private key secure file and authorize the pipeline to use it."
+        }
         throw "JWT key file not found: $JwtKeyPath"
     }
+    $JwtKeyPath = Convert-JwtPrivateKeyFile -Path $JwtKeyPath
     Write-Host "##[section]Authorize org via JWT ($Alias) instance=$resolvedUrl orgType=$OrgType"
     Invoke-Checked -Exe 'sf' -Arguments @(
         'org', 'login', 'jwt',
@@ -679,23 +962,37 @@ if ([string]::IsNullOrWhiteSpace($orgType)) { $orgType = 'sandbox' }
 $clientId = Get-TaskInput -Name 'client_id'
 $username = Get-TaskInput -Name 'username'
 $instanceUrl = Get-TaskInput -Name 'instance_url'
-$jwtKeyFile = Get-TaskInput -Name 'jwt_key_file'
+$jwtKeyFile = Repair-OptionalPath (Get-TaskInput -Name 'jwt_key_file')
 $jwtSecureFile = Get-TaskInput -Name 'jwtKeySecureFile'
-$jwtTokenPath = Get-TaskInput -Name 'jwt_token_path'
-$jwtPath = if (-not [string]::IsNullOrWhiteSpace($jwtTokenPath)) { $jwtTokenPath }
-    elseif (-not [string]::IsNullOrWhiteSpace($jwtSecureFile)) { $jwtSecureFile }
-    else { $jwtKeyFile }
-if (-not [string]::IsNullOrWhiteSpace($jwtPath)) {
-    $jwtPath = $jwtPath.Trim().Trim('"')
-    $jwtPathWithoutParen = $jwtPath.TrimEnd([char]')')
-    if (-not (Test-Path -LiteralPath $jwtPath) -and $jwtPath.EndsWith(')') -and (Test-Path -LiteralPath $jwtPathWithoutParen)) {
-        Write-Host "##[warning]JWT path had a trailing parenthesis. Using $jwtPathWithoutParen."
-        $jwtPath = $jwtPathWithoutParen
-    }
+$jwtTokenPath = Repair-OptionalPath (Get-TaskInput -Name 'jwt_token_path')
+$jwtPath = $null
+if (-not [string]::IsNullOrWhiteSpace($jwtTokenPath) -and (Test-Path -LiteralPath $jwtTokenPath)) {
+    $jwtPath = $jwtTokenPath
 }
-$sfdxAuthUrlFile = Get-TaskInput -Name 'sfdx_auth_url_file'
+elseif (-not [string]::IsNullOrWhiteSpace($jwtSecureFile)) {
+    if (-not [string]::IsNullOrWhiteSpace($jwtTokenPath)) {
+        Write-Host '##[warning]JWT path override was not found. Downloading the JWT private key secure file.'
+    }
+    $jwtPath = Resolve-SecureOrPathInput -SecureFileValue $jwtSecureFile -Label 'JWT private key'
+}
+elseif (-not [string]::IsNullOrWhiteSpace($jwtTokenPath)) {
+    $jwtPath = $jwtTokenPath
+}
+else {
+    $jwtPath = $jwtKeyFile
+}
+$sfdxAuthUrlPath = Repair-OptionalPath (Get-TaskInput -Name 'sfdx_auth_url_file')
 $sfdxAuthUrlSecureFile = Get-TaskInput -Name 'sfdxAuthUrlSecureFile'
-if (-not [string]::IsNullOrWhiteSpace($sfdxAuthUrlSecureFile)) { $sfdxAuthUrlFile = $sfdxAuthUrlSecureFile.Trim().Trim('"') }
+$sfdxAuthUrlFile = $null
+if (-not [string]::IsNullOrWhiteSpace($sfdxAuthUrlPath) -and (Test-Path -LiteralPath $sfdxAuthUrlPath)) {
+    $sfdxAuthUrlFile = $sfdxAuthUrlPath
+}
+elseif (-not [string]::IsNullOrWhiteSpace($sfdxAuthUrlSecureFile)) {
+    $sfdxAuthUrlFile = Resolve-SecureOrPathInput -SecureFileValue $sfdxAuthUrlSecureFile -Label 'SFDX Auth URL'
+}
+else {
+    $sfdxAuthUrlFile = $sfdxAuthUrlPath
+}
 $sfdxAuthUrl = Get-TaskInput -Name 'sfdx_auth_url'
 
 $sfVer = Get-TaskInput -Name 'sfCliVersion'
