@@ -3,8 +3,8 @@
   "id": "6f8e9a1b-2c3d-4e5f-8a9b-0c1d2e3f4a5b",
   "name": "SfOrgValidateDeploy",
   "friendlyName": "Salesforce Org Validate & Deploy (Delta)",
-  "description": "Generates delta with sfdx-git-delta (HEAD vs HEAD~1), optional Code Analyzer on delta only (default rules or custom PMD ruleset), JWT or SFDX Auth URL org login, validate or deploy, and pipeline artifacts.",
-  "helpMarkDown": "[Salesforce Delta Pipeline](https://github.com/WryCathedral/SF_Delta_Deployment). Select the JWT or Auth URL secure file on this task. A shallow checkout is fetched automatically so HEAD~1 exists.",
+  "description": "Generates delta with sfdx-git-delta (HEAD vs HEAD~1) and prints package.xml and destructiveChanges.xml, optional Code Analyzer on delta only (default rules or custom PMD ruleset), JWT or SFDX Auth URL org login, validate or deploy with Flow deletions expanded to every version, and pipeline artifacts.",
+  "helpMarkDown": "[Salesforce Delta Pipeline](https://github.com/WryCathedral/SF_Delta_Deployment). Select the JWT or Auth URL secure file on this task. A shallow checkout is fetched automatically so HEAD~1 exists. Flow deletions in destructiveChanges.xml are expanded to every flow version in the target org before validate or deploy.",
   "category": "Deploy",
   "author": "Your Team",
   "visibility": [
@@ -15,7 +15,7 @@
   "version": {
     "Major": 1,
     "Minor": 0,
-    "Patch": 6
+    "Patch": 7
   },
   "minimumAgentVersion": "4.248.0",
   "instanceNameFormat": "Salesforce Org Validate & Deploy (Delta)",

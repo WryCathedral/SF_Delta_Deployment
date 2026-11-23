@@ -593,6 +593,213 @@ function Invoke-SgdDelta {
         throw "package/package.xml not found after delta. Check git history and paths."
     }
     Write-StepBanner 'Delta package generated.'
+    Show-DeltaManifests -SourcesRoot $SourcesRoot
+}
+
+function Write-ManifestContents {
+    param(
+        [string]$Title,
+        [string]$Path,
+        [string]$MissingMessage
+    )
+    Write-Host "##[section]$Title"
+    if (-not (Test-Path -LiteralPath $Path)) {
+        Write-Host $MissingMessage
+        return
+    }
+    $text = [System.IO.File]::ReadAllText($Path)
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        Write-Host '(file is empty)'
+        return
+    }
+    # A line that starts with ## would be read as a pipeline logging command.
+    Write-Host ($text.TrimEnd() -replace '(?m)^##', '# #')
+}
+
+function Show-DeltaManifests {
+    param([string]$SourcesRoot)
+    Write-ManifestContents -Title 'package/package.xml (components to add or update)' `
+        -Path (Join-Path $SourcesRoot 'package/package.xml') `
+        -MissingMessage 'package/package.xml was not found.'
+    Write-ManifestContents -Title 'destructiveChanges/destructiveChanges.xml (components to delete)' `
+        -Path (Join-Path $SourcesRoot 'destructiveChanges/destructiveChanges.xml') `
+        -MissingMessage 'No destructiveChanges.xml was generated, so the delta has no deletions.'
+}
+
+function Test-ManifestHasTypes {
+    param([string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) { return $false }
+    return [regex]::IsMatch([System.IO.File]::ReadAllText($Path), '<types>')
+}
+
+function Get-JsonProperty {
+    param($Object, [string]$Name)
+    if ($null -eq $Object) { return $null }
+    $property = $Object.PSObject.Properties[$Name]
+    if ($null -eq $property) { return $null }
+    return $property.Value
+}
+
+# Deleting a Flow by API name alone fails from Metadata API 44 onward with
+# "insufficient access rights on cross-reference id". Each version must be named
+# ApiName-N in destructiveChanges.xml, so unversioned members are expanded to every
+# version that exists in the target org.
+function Get-UnversionedFlowMembers {
+    param([string]$Xml)
+    $names = [System.Collections.Generic.List[string]]::new()
+    foreach ($block in [regex]::Matches($Xml, '<types>[\s\S]*?</types>')) {
+        $nameMatch = [regex]::Match($block.Value, '<name>([^<]+)</name>')
+        if (-not $nameMatch.Success -or $nameMatch.Groups[1].Value.Trim() -ne 'Flow') { continue }
+        foreach ($member in [regex]::Matches($block.Value, '<members>([^<]+)</members>')) {
+            $memberName = $member.Groups[1].Value.Trim()
+            if ($memberName -notmatch '-\d+$' -and -not $names.Contains($memberName)) {
+                $names.Add($memberName)
+            }
+        }
+    }
+    return @($names.ToArray())
+}
+
+function Get-OrgFlowVersions {
+    param(
+        [string[]]$Names,
+        [string]$Alias
+    )
+    $byName = @{}
+    $batchSize = 50
+    for ($start = 0; $start -lt $Names.Count; $start += $batchSize) {
+        $end = [Math]::Min($start + $batchSize, $Names.Count) - 1
+        $literals = @(
+            $Names[$start..$end] | ForEach-Object { "'" + $_.Replace('\', '\\').Replace("'", "\'") + "'" }
+        ) -join ','
+        $soql = "SELECT VersionNumber, Definition.DeveloperName FROM Flow WHERE Definition.DeveloperName IN ($literals)"
+
+        $previousPreference = $ErrorActionPreference
+        $ErrorActionPreference = 'Continue'
+        $queryText = & sf data query --use-tooling-api --target-org $Alias --query $soql --json 2>&1 | Out-String
+        $queryCode = $LASTEXITCODE
+        $ErrorActionPreference = $previousPreference
+
+        $parsed = ConvertFrom-SfJsonText -Text $queryText
+        if ($queryCode -ne 0 -or $null -eq $parsed) {
+            Write-Host $queryText
+            throw "Flow version query failed against '$Alias'. Flow deletions cannot be expanded to versions."
+        }
+        $result = Get-JsonProperty -Object $parsed -Name 'result'
+        $records = @(Get-JsonProperty -Object $result -Name 'records')
+        foreach ($record in $records) {
+            if ($null -eq $record) { continue }
+            $definition = Get-JsonProperty -Object $record -Name 'Definition'
+            $name = [string](Get-JsonProperty -Object $definition -Name 'DeveloperName')
+            if ([string]::IsNullOrWhiteSpace($name)) { $name = [string](Get-JsonProperty -Object $record -Name 'Definition.DeveloperName') }
+            $version = 0
+            if ([string]::IsNullOrWhiteSpace($name) -or -not [int]::TryParse([string](Get-JsonProperty -Object $record -Name 'VersionNumber'), [ref]$version)) { continue }
+            if (-not $byName.ContainsKey($name)) { $byName[$name] = [System.Collections.Generic.List[int]]::new() }
+            if (-not $byName[$name].Contains($version)) { $byName[$name].Add($version) }
+        }
+    }
+    foreach ($key in @($byName.Keys)) { $byName[$key].Sort() }
+    return $byName
+}
+
+function Expand-FlowDestructiveVersions {
+    param(
+        [string]$Path,
+        [string]$Alias
+    )
+    $outcome = [pscustomobject]@{ Changed = $false; HasTypes = $false }
+    if ([string]::IsNullOrWhiteSpace($Path) -or -not (Test-Path -LiteralPath $Path)) {
+        Write-Host 'No destructiveChanges file to version.'
+        return $outcome
+    }
+    $xml = [System.IO.File]::ReadAllText($Path)
+    $outcome.HasTypes = [regex]::IsMatch($xml, '<types>')
+    $pending = @(Get-UnversionedFlowMembers -Xml $xml)
+    if ($pending.Count -eq 0) {
+        Write-Host 'No unversioned Flow deletions to expand.'
+        return $outcome
+    }
+
+    Write-Host "##[section]Flow deletions: expanding $($pending -join ', ') to every version in $Alias"
+    $versionsByName = Get-OrgFlowVersions -Names $pending -Alias $Alias
+
+    $newline = if ($xml.Contains("`r`n")) { "`r`n" } else { "`n" }
+    $builder = New-Object System.Text.StringBuilder
+    $position = 0
+    foreach ($block in [regex]::Matches($xml, '<types>[\s\S]*?</types>')) {
+        [void]$builder.Append($xml.Substring($position, $block.Index - $position))
+        $position = $block.Index + $block.Length
+        $replacement = $block.Value
+
+        $nameMatch = [regex]::Match($block.Value, '<name>([^<]+)</name>')
+        if ($nameMatch.Success -and $nameMatch.Groups[1].Value.Trim() -eq 'Flow') {
+            $indentMatch = [regex]::Match($block.Value, '\r?\n([ \t]*)<members>')
+            $memberIndent = if ($indentMatch.Success) { $indentMatch.Groups[1].Value } else { '        ' }
+            $closeIndent = [regex]::Match($xml.Substring(0, $block.Index), '[ \t]*$').Value
+
+            $expanded = [System.Collections.Generic.List[string]]::new()
+            foreach ($member in [regex]::Matches($block.Value, '<members>([^<]+)</members>')) {
+                $memberName = $member.Groups[1].Value.Trim()
+                if ($memberName -match '-\d+$') {
+                    if (-not $expanded.Contains($memberName)) { $expanded.Add($memberName) }
+                    continue
+                }
+                if (-not $versionsByName.ContainsKey($memberName) -or $versionsByName[$memberName].Count -eq 0) {
+                    Write-Host "No versions in $Alias for $memberName; omitting it."
+                    continue
+                }
+                foreach ($version in $versionsByName[$memberName]) {
+                    $versioned = "$memberName-$version"
+                    if (-not $expanded.Contains($versioned)) { $expanded.Add($versioned) }
+                }
+            }
+
+            if ($expanded.Count -eq 0) {
+                Write-Host 'Stripped empty Flow destructive type.'
+                $replacement = ''
+            }
+            else {
+                Write-Host "Flow deletions: $($expanded -join ', ')"
+                $lines = @($expanded | ForEach-Object { "$memberIndent<members>$_</members>" })
+                $replacement = '<types>' + $newline + ($lines -join $newline) + $newline + $memberIndent + '<name>Flow</name>' + $newline + $closeIndent + '</types>'
+            }
+        }
+        [void]$builder.Append($replacement)
+    }
+    [void]$builder.Append($xml.Substring($position))
+    $updated = $builder.ToString()
+
+    if (-not [regex]::IsMatch($updated, '<types>')) {
+        $apiVersion = '67.0'
+        $versionMatch = [regex]::Match($xml, '<version>([^<]+)</version>')
+        if ($versionMatch.Success) { $apiVersion = $versionMatch.Groups[1].Value.Trim() }
+        $updated = '<?xml version="1.0" encoding="UTF-8"?>' + $newline +
+            '<Package xmlns="http://soap.sforce.com/2006/04/metadata">' + $newline +
+            "    <version>$apiVersion</version>" + $newline +
+            '</Package>' + $newline
+    }
+
+    if ($updated -ne $xml) {
+        [System.IO.File]::WriteAllText($Path, $updated, (New-Object System.Text.UTF8Encoding $false))
+        Write-Host "Updated $Path"
+        $outcome.Changed = $true
+    }
+    $outcome.HasTypes = [regex]::IsMatch($updated, '<types>')
+    return $outcome
+}
+
+function Copy-ExpandedDestructiveArtifact {
+    param(
+        [string]$SourcesRoot,
+        [string]$Path
+    )
+    if (-not (Test-Path -LiteralPath $Path)) { return }
+    $artifactFolder = Join-Path $SourcesRoot 'artifacts'
+    if (-not (Test-Path -LiteralPath $artifactFolder)) {
+        New-Item -ItemType Directory -Force -Path $artifactFolder | Out-Null
+    }
+    $ts = (Get-Date).ToString('yyyyMMdd_HHmmss')
+    Copy-Item -LiteralPath $Path -Destination (Join-Path $artifactFolder "destructiveChanges_flow-versions_$ts.xml") -Force
 }
 
 function Copy-DeltaArtifacts {
@@ -1140,7 +1347,21 @@ try {
         }
     }
 
-    if ($resolved -eq 'validate') {
+    $skipOrgOperation = $false
+    $flowOutcome = Expand-FlowDestructiveVersions -Path $destXml -Alias $alias
+    if ($flowOutcome.Changed) {
+        Copy-ExpandedDestructiveArtifact -SourcesRoot $root -Path $destXml
+        Write-ManifestContents -Title 'destructiveChanges/destructiveChanges.xml after Flow version expansion' `
+            -Path $destXml -MissingMessage 'destructiveChanges.xml was not found.'
+        if (-not $flowOutcome.HasTypes -and -not (Test-ManifestHasTypes -Path $pkgXml)) {
+            $skipOrgOperation = $true
+        }
+    }
+
+    if ($skipOrgOperation) {
+        Write-StepBanner "No components remain after Flow version expansion. Nothing to $resolved."
+    }
+    elseif ($resolved -eq 'validate') {
         Write-Host "Validate test level: $validateTestLevel | wait=$deployWaitTime | ignoreWarnings=$ignoreWarnings"
         Invoke-SfOrgDeploy -ActionName 'Validation' -Alias $alias -PackageXml $pkgXml -DestructiveXml $destXml -TestLevel $validateTestLevel -SpecifiedTests $validateSpecifiedTests -WaitMinutes $deployWaitTime -IgnoreWarnings $ignoreWarnings -IgnoreConflicts $false -DryRun $true -MinimumCoverage $minimumCoverage
     }

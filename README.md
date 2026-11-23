@@ -1,6 +1,6 @@
 # Salesforce Delta Pipeline
 
-`SfOrgValidateDeploy` validates or deploys a Salesforce metadata delta. Install extension **1.0.6** (publisher `GouravPragvamsaPwC`) from the `vsix` folder. The task name in YAML is `SfOrgValidateDeploy@1`.
+`SfOrgValidateDeploy` validates or deploys a Salesforce metadata delta. Install extension **1.0.7** (publisher `GouravPragvamsaPwC`) from the `vsix` folder. The task name in YAML is `SfOrgValidateDeploy@1`.
 
 How to install it in Azure DevOps, store the JWT key, and create the pipeline: [Set up the pipeline in Azure DevOps](docs/azure-devops-setup.md).
 
@@ -12,17 +12,51 @@ The pipeline that sets every input is [pipelines/example-azure-pipelines.yml](pi
 2. Installs the latest stable Salesforce CLI unless you pin a version or skip installation.
 3. Installs `sfdx-git-delta`, and installs Code Analyzer when that option is on for a validation run.
 4. Downloads the JWT or Auth URL secure file selected on the task.
-5. Builds the delta between `deltaFromRef` and `deltaToRef` (default `HEAD~1`..`HEAD`).
+5. Builds the delta between `deltaFromRef` and `deltaToRef` (default `HEAD~1`..`HEAD`), then prints the full contents of `package/package.xml` and `destructiveChanges/destructiveChanges.xml` in the log under the **Delta package generated.** banner.
 6. On validation only, optionally scans the delta with Code Analyzer.
-7. Validates (`--dry-run`) or deploys `package/package.xml`, including destructive changes when the delta produced them.
-8. Publishes the delta package and Code Analyzer report even when validation, deployment, or the scan fails.
-9. Writes a one-sentence status banner after each step. Validation and deployment each report succeeded, failed, or canceled, and list rejected components.
+7. Expands Flow deletions to every flow version that exists in the target org (see [Deleting flows](#deleting-flows)).
+8. Validates (`--dry-run`) or deploys `package/package.xml`, including destructive changes when the delta produced them.
+9. Publishes the delta package and Code Analyzer report even when validation, deployment, or the scan fails.
+10. Writes a one-sentence status banner after each step. Validation and deployment each report succeeded, failed, or canceled, and list rejected components.
 
 `operationMode: auto` validates when a pull request **targets** `targetBranch`, and deploys when a non-PR build runs on that same branch. Other branches are skipped. Code Analyzer does not run on deploy. A task cannot add pipeline stages or jobs.
 
+## Deleting flows
+
+From Metadata API 44 onward, a destructive change that names a Flow by API name alone fails with `insufficient access rights on cross-reference id`. Each version has to be named `ApiName-N`.
+
+Before every validation and deployment, the task reads `destructiveChanges.xml` and handles each `Flow` member that has no version suffix:
+
+1. It queries the target org through the Tooling API (`sf data query --use-tooling-api`) for every version of that flow.
+2. It rewrites the member into one entry per version, for example `Account_Flow` becomes `Account_Flow-1`, `Account_Flow-2`, and `Account_Flow-3`.
+3. Members that already end in `-N` are left as they are. Other metadata types are not touched.
+4. A flow that has no versions in the org is dropped from the manifest, so a re-run after a successful delete does not fail. If that leaves nothing to deploy and `package.xml` is empty too, the task logs `No components remain after Flow version expansion` and skips the org operation.
+
+The log shows the manifest before and after the rewrite, and the delta artifact gets an extra `destructiveChanges_flow-versions_<timestamp>.xml` with what was actually sent to the org. No input is needed. If the Tooling API query fails, the task stops before deploying and still publishes the delta artifact. The login user must be able to query `Flow` through the Tooling API.
+
+This is the same fix as `version-flow-destructive.js` in the LSCCRM `.azure` folder, built into the task.
+
+## Tests
+
+These run on Windows with Windows PowerShell 5.1 and Node.js. They do not need a Salesforce org.
+
+```powershell
+# Unit tests for the manifest display and the Flow version expansion
+powershell -NoProfile -File tests/Test-FlowDestructive.ps1
+
+# Runs the whole task against a temporary git repo with a fake sf CLI.
+# -BaselineRef compares the sf calls with an earlier version of the task.
+powershell -NoProfile -File tests/Test-EndToEnd.ps1 -BaselineRef <git ref>
+```
+
+## Release notes
+
+- **1.0.7**: prints `package.xml` and `destructiveChanges.xml` in the log, and expands Flow deletions to every version.
+- **1.0.6**: downloads the JWT or Auth URL secure file inside the task, reports validation and deployment status, and checks per-class Apex coverage.
+
 ## Set up a pipeline
 
-1. Install **1.0.6** in **Organization settings → Extensions**.
+1. Install **1.0.7** in **Organization settings → Extensions**.
 2. Create a variable group, for example `QA-Org`, with `alias`, `client_id`, and `username`.
 3. Upload the unencrypted PEM private key, or an Auth URL file, under **Pipelines → Library → Secure files**, and authorize the pipeline to use it.
 4. Add the YAML from [pipelines/example-azure-pipelines.yml](pipelines/example-azure-pipelines.yml). Set `targetBranch`, the variable group, and `jwtKeySecureFile` to your secure file name.

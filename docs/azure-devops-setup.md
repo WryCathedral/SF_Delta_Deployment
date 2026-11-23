@@ -1,6 +1,6 @@
 # Set up the Salesforce Delta Pipeline in Azure DevOps
 
-This guide installs **Salesforce Delta Pipeline** `1.0.6` and wires `SfOrgValidateDeploy@1` into an Azure DevOps YAML pipeline. The task builds a metadata delta with `sfdx-git-delta` (`HEAD~1` to `HEAD` by default), logs in with JWT or an SFDX Auth URL, then validates or deploys that delta.
+This guide installs **Salesforce Delta Pipeline** `1.0.7` and wires `SfOrgValidateDeploy@1` into an Azure DevOps YAML pipeline. The task builds a metadata delta with `sfdx-git-delta` (`HEAD~1` to `HEAD` by default), logs in with JWT or an SFDX Auth URL, then validates or deploys that delta.
 
 The annotated pipeline with every task input is [`pipelines/example-azure-pipelines.yml`](../pipelines/example-azure-pipelines.yml).
 
@@ -26,8 +26,8 @@ Code Analyzer, when enabled, runs only on validation and only on the delta sourc
 ## 1. Install the extension
 
 1. In Azure DevOps, open **Organization settings → Extensions**.
-2. Install **Salesforce Delta Pipeline** version **1.0.6** (publisher `GouravPragvamsaPwC`, extension id `sf-delta-pipeline-extension`).
-3. If you are installing from a file, upload `vsix/GouravPragvamsaPwC.sf-delta-pipeline-extension-1.0.6.vsix` and share it with the organization.
+2. Install **Salesforce Delta Pipeline** version **1.0.7** (publisher `GouravPragvamsaPwC`, extension id `sf-delta-pipeline-extension`).
+3. If you are installing from a file, upload `vsix/GouravPragvamsaPwC.sf-delta-pipeline-extension-1.0.7.vsix` and share it with the organization.
 4. Confirm the task **Salesforce Org Validate & Deploy (Delta)** appears when you edit a pipeline. The YAML name is `SfOrgValidateDeploy@1`.
 
 The task does not create stages or jobs. Put those in the YAML around this one task.
@@ -144,7 +144,7 @@ Recommended checkout, because the task runs `git fetch --unshallow` when `HEAD~1
 
 ## 5. Inputs
 
-Defaults match `buildAndReleaseTasks/SfOrgValidateDeploy/task.json` for extension `1.0.6`.
+Defaults match `buildAndReleaseTasks/SfOrgValidateDeploy/task.json` for extension `1.0.7`.
 
 ### Operation
 
@@ -185,6 +185,36 @@ JWT path order: an existing `jwt_token_path`, then `jwtKeySecureFile`, then `jwt
 | `ignoreFile` | No | empty | Optional sfdx-git-delta ignore file. When blank, the task uses `ignorefile` or `.sgdignore` in the repo root if one of those files exists. |
 
 The delta command writes `package/package.xml` and, when there are deletions, `destructiveChanges/destructiveChanges.xml`. Both `ignoredestructive` and `includedestructive` handling is enabled. The task copies those manifests into `artifacts/` before publish. If `package/package.xml` is missing after the delta, the task fails.
+
+Right after the **Delta package generated.** banner the log prints the full contents of both files, under the headings `package/package.xml (components to add or update)` and `destructiveChanges/destructiveChanges.xml (components to delete)`. When the delta has no deletions, the log says `No destructiveChanges.xml was generated, so the delta has no deletions.` Use this output to confirm what the run is about to send to the org.
+
+## Deleting flows
+
+From Metadata API 44 onward, a destructive change that names a Flow by API name alone fails with `insufficient access rights on cross-reference id`. Every version has to be listed as `ApiName-N`. The task does this for you before every validation and deployment. There is no input to set.
+
+For each `Flow` member in `destructiveChanges.xml` that has no `-N` suffix, the task:
+
+1. Queries the target org with `sf data query --use-tooling-api` for every version of that flow. Names are sent in batches of 50.
+2. Replaces the member with one entry per version found. `Account_Flow` becomes `Account_Flow-1`, `Account_Flow-2`, `Account_Flow-3`.
+3. Leaves members that already end in `-N`, and every other metadata type, as they are.
+4. Drops a flow that has no versions in the org. This keeps a re-run from failing after the delete already succeeded.
+
+Example log output:
+
+```text
+##[section]Flow deletions: expanding Account_Flow to every version in qa
+Flow deletions: Account_Flow-1, Account_Flow-2, Account_Flow-3
+##[section]destructiveChanges/destructiveChanges.xml after Flow version expansion
+```
+
+What to expect:
+
+- The expanded manifest is what `--post-destructive-changes` receives, and the delta artifact gets a copy named `destructiveChanges_flow-versions_<timestamp>.xml`. The original manifest stays in the artifact as `destructiveChanges_<timestamp>.xml`.
+- If every deleted flow is already gone from the org and `package.xml` has no components either, the task logs `No components remain after Flow version expansion. Nothing to validate.` (or `deploy`) and finishes successfully without calling the org.
+- If the Tooling API query fails, the task stops before deploying, reports `Flow version query failed`, and still publishes the delta artifact.
+- The login user must be able to query `Flow` through the Tooling API. The query runs against the org that the pipeline logs in to, so validation and deployment each look at their own org.
+
+This is the same approach as `version-flow-destructive.js` in the LSCCRM `.azure` folder, built into the task so no extra script or step is needed in the pipeline.
 
 ### Apex tests
 
@@ -231,11 +261,11 @@ The report is written to `reports/code-analyzer-report.csv`. If `changed-sources
 | `publishCodeAnalyzerArtifact` | No | `false` | Publishes `reports/` even when the scan fails. Only useful when Code Analyzer is enabled. |
 | `codeAnalyzerArtifactName` | No | `sf-code-analyzer` | Pipeline artifact name. The example uses `$(Build.DefinitionName)-Code-Analyzer`. |
 
-Published files are placed in the container folders `Delta-Package` and `Code-Analyzer`.
+Published files are placed in the container folders `Delta-Package` and `Code-Analyzer`. The delta artifact holds `package_<timestamp>.xml`, `destructiveChanges_<timestamp>.xml` when there are deletions, and `destructiveChanges_flow-versions_<timestamp>.xml` when Flow deletions were expanded.
 
 ## 6. Run it
 
-1. Open a pull request into the branch named by `targetBranch`. The task should log `mode=validate`, generate the delta, and finish with `Validation succeeded.` or `Validation failed.`
+1. Open a pull request into the branch named by `targetBranch`. The task should log `mode=validate`, generate the delta, print `package.xml` and `destructiveChanges.xml`, and finish with `Validation succeeded.` or `Validation failed.`
 2. Complete the pull request. The CI build on that branch should log `mode=deploy` and finish with `Deployment succeeded.` or `Deployment failed.`
 3. Open the run's **Summary** and confirm the delta artifact. When the scan is published, the Code Analyzer artifact is there too.
 4. On a branch that is not the target, `auto` logs a skip message and the task succeeds without logging in.
@@ -254,5 +284,8 @@ Rejected components are listed in the log as `##[error]` lines from the deploy r
 | `package/package.xml` not found after delta | The range produced no package the plugin could write. Confirm `sfdx-project.json` and that the commits contain metadata changes. |
 | RunSpecifiedTests was selected but no test class names were provided | Set `validateSpecifiedTests` or `deploySpecifiedTests`. |
 | PMD ruleset file not found | Set `pmdRulesetPath` to a file that exists in the checkout. |
+| `Flow version query failed` | The Tooling API query for flow versions failed. Check that the org login worked, the user can query `Flow` through the Tooling API, and the alias points at the right org. The log above the error shows the CLI output. |
+| `insufficient access rights on cross-reference id` on a Flow delete | The deployment ran a delete that was not versioned. Confirm extension 1.0.7 or later is installed and that the log shows `Flow deletions: ...` lines. |
+| `No components remain after Flow version expansion` | Not an error. Every deleted flow is already gone from the org and there is nothing else to send. |
 | Job canceled around 60 minutes | Increase `timeoutInMinutes` so it is greater than `deployWaitTime`. |
 | Coverage is below the required percent | Raise test coverage, or set `codeCoveragePercent` to the threshold you actually want. `NoTestRun` skips this check. |
